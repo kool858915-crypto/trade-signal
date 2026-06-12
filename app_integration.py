@@ -2,17 +2,17 @@
 """
 app_integration.py — 既存アプリへの組み込み(画面表示)
 
-http.server (server.py) 向け:
-    from app_integration import api_recommendations
-    GET /api/recommendations → api_recommendations(refresh=...)
+既存のFastAPIアプリに2行追加するだけ:
 
-FastAPI アプリ向け(任意):
     from app_integration import router as news_router
     app.include_router(news_router)
 
-ホーム画面のHTMLには HOME_NEWS_HTML スニペットを参考に埋め込む。
-「おすすめを更新」→ GET /api/recommendations
-「取引を開始」→ 表示中の codes を既存デモ取引スキャンへ渡す
+http.server (server.py) 向け:
+    GET /api/recommendations → api_recommendations(refresh=...)
+
+ホーム画面のHTMLには下部の HOME_NEWS_HTML スニペットを埋め込む。
+「おすすめを更新」ボタン → GET /api/recommendations を叩いて描画。
+「取引を開始」ボタン → 表示中の codes を既存のデモ取引スキャン処理へ渡す。
 """
 
 from __future__ import annotations
@@ -28,18 +28,21 @@ _cache: dict = {"data": None, "ts": 0}
 CACHE_SEC = 600  # 10分
 
 
-def api_recommendations(refresh: bool = False, style: str = "day") -> dict:
-    """「おすすめを更新」ボタンから呼ぶ。refresh=True で強制再取得。"""
+def _load_recommendations(refresh: bool = False) -> dict:
+    """キャッシュ付きで get_recommendations() を返す"""
     now = time.time()
     if refresh or _cache["data"] is None or now - _cache["ts"] > CACHE_SEC:
         _cache["data"] = get_recommendations()
         _cache["ts"] = now
+    return _cache["data"]
 
-    data = dict(_cache["data"])
+
+def api_recommendations(refresh: bool = False, style: str = "day") -> dict:
+    """http.server (server.py) から呼ぶエンドポイント実装"""
+    data = dict(_load_recommendations(refresh))
     codes = [r["code"] for r in data.get("recommendations", [])]
     data["codes"] = codes
 
-    # デモスキャン用に銘柄リストを保存
     try:
         import trade_core as tc
         tc._set_setting(f"recommended_jp_{style}", json.dumps(codes))
@@ -51,18 +54,10 @@ def api_recommendations(refresh: bool = False, style: str = "day") -> dict:
         pass
 
     data["ok"] = True
-    data["cached"] = not refresh and (now - _cache["ts"] < CACHE_SEC)
+    data["cached"] = not refresh
     return data
 
 
-def get_cached_codes() -> list[str]:
-    """直近キャッシュの銘柄コード一覧"""
-    if _cache["data"]:
-        return [r["code"] for r in _cache["data"].get("recommendations", [])]
-    return []
-
-
-# FastAPI があればルーターを提供(なければスキップ)
 try:
     from fastapi import APIRouter
 
@@ -70,7 +65,8 @@ try:
 
     @router.get("/api/recommendations")
     def fastapi_recommendations(refresh: bool = False):
-        return api_recommendations(refresh=refresh)
+        """「おすすめを更新」ボタンから呼ぶ。?refresh=true で強制再取得。"""
+        return _load_recommendations(refresh)
 
 except ImportError:
     router = None
@@ -78,7 +74,7 @@ except ImportError:
 
 # ============================================================
 # ホーム画面に埋め込むHTML+JS(テーマチップ / バッジ / 理由表示)
-# ※ static/index.html に同等のUIを組み込み済み
+# ※ static/index.html に同等UIを組み込み済み
 # ============================================================
 HOME_NEWS_HTML = """
 <style>
@@ -93,7 +89,8 @@ HOME_NEWS_HTML = """
 .badge-news{background:#fde8e8;color:#c81e1e}
 .badge-theme{background:#fdf6b2;color:#8e4b10}
 .score{margin-left:auto;font-weight:700;color:#1a56db}
-.reason{font-size:12px;color:#666;margin-top:6px}
+.chain{font-size:12px;color:#1a56db;font-weight:600;margin-top:6px}
+.reason{font-size:12px;color:#666;margin-top:4px}
 </style>
 
 <h3>本日のニューステーマ</h3>
@@ -109,19 +106,20 @@ HOME_NEWS_HTML = """
 let currentCodes = [];
 
 async function updateRecommendations(force=false){
-  const res = await fetch('/api/recommendations' + (force ? '?refresh=true' : ''), {
-    headers: {'X-Pin': localStorage.getItem('trade_pin') || ''}
-  });
+  const res = await fetch('/api/recommendations' + (force ? '?refresh=true' : ''));
   const data = await res.json();
 
+  // テーマチップ
   document.getElementById('themeChips').innerHTML =
     data.themes.map(t => `<span class="chip">${t.theme}</span>`).join('');
 
+  // 参考見出し(最新ニュース1件)
   if (data.themes.length){
     document.getElementById('newsHeadline').textContent =
       '参考見出し: ' + data.themes[0].headline;
   }
 
+  // 銘柄カード(バッジ+理由)
   currentCodes = data.recommendations.map(r => r.code);
   document.getElementById('stockList').innerHTML =
     data.recommendations.map(r => `
@@ -129,25 +127,24 @@ async function updateRecommendations(force=false){
         <div class="stock-head">
           <span class="stock-name">${r.code} ${r.name}</span>
           ${r.badges.map(b => `<span class="badge ${
-              b==='ニュース関連' ? 'badge-news' : 'badge-theme'
+              b==='波及銘柄' ? 'badge-news' : 'badge-theme'
             }">${b}</span>`).join('')}
           <span class="score">${r.total_score}</span>
         </div>
+        ${r.chains && r.chains.length
+            ? `<div class="chain">${r.chains.join(' / ')}</div>` : ''}
         <div class="reason">${r.reason}</div>
       </div>`).join('');
 }
 
-async function startTrading(){
-  await fetch('/api/start?market=jp&style=day', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'X-Pin': localStorage.getItem('trade_pin') || ''
-    },
-    body: JSON.stringify({codes: currentCodes})
-  });
+function startTrading(){
+  // ★ 既存のデモ取引スキャン処理に currentCodes を渡す
+  //    例: fetch('/api/start_scan', {method:'POST',
+  //          headers:{'Content-Type':'application/json'},
+  //          body: JSON.stringify({codes: currentCodes})});
+  alert('スキャン対象: ' + currentCodes.join(', '));
 }
 
-updateRecommendations();
+updateRecommendations();  // 初回ロード
 </script>
 """

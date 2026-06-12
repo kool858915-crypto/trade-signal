@@ -80,15 +80,17 @@ def _build_reasons(signal: str, conds: list, cond_score: int,
     reasons = []
 
     if news_info:
-        themes = "・".join(news_info.get("themes", [])[:2])
+        chains = news_info.get("chains") or news_info.get("themes", [])
+        chain_label = " / ".join(chains[:2])
+        logic = news_info.get("logic", "")
+        if logic:
+            reasons.append(f"波及銘柄（{chain_label}）: {logic}")
+        elif chain_label:
+            reasons.append(f"波及銘柄: {chain_label}")
         headline = news_info.get("headline") or (news_info.get("headlines") or [""])[0]
         if headline:
             short = headline[:70] + ("…" if len(headline) > 70 else "")
-            reasons.append(f"ニュース関連（{themes}）: {short}")
-        else:
-            reasons.append(f"ニュース関連テーマ: {themes}")
-        if news_info.get("name"):
-            reasons.append(f"{news_info['name']} — 中型・テーマ株も視野に入れた候補")
+            reasons.append(f"参考ニュース: {short}")
 
     if pool_note and " — " in pool_note:
         reasons.append(pool_note)
@@ -287,7 +289,8 @@ def _action_recommend_jp(style: str, limit: int) -> dict:
             "chart_score": r["chart_score"],
             "news_score": r["news_score"],
             "badges": r["badges"],
-            "news_themes": r["themes"],
+            "news_themes": r.get("chains", r.get("themes", [])),
+            "chains": r.get("chains", []),
             "reasons": [r["reason"]],
             "source": "news" if r["is_news"] else "large_cap",
         }

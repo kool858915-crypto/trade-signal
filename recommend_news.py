@@ -4,9 +4,9 @@ recommend_news.py — おすすめ選定(チャート分析 + ニュース関連
 
 選定ルール:
   1. 大型株24銘柄(従来どおり) ← LARGE_CAPS_24 を既存リストに差し替え可
-  2. ニュースで浮上したテーマ株(中型株含む)を候補に追加
+  2. ニュースのテーマから連想される【波及銘柄】(中型株含む)を候補に追加
   3. チャートスコア(70%) + ニューススコア(30%) でランキング
-  4. 上位5件のうち「ニュース関連」を最低2件含める
+  4. 上位5件のうち「波及銘柄」を最低2件含める
 
 アプリ側からは get_recommendations() を呼ぶだけ。
 返り値はそのまま画面表示に使えるdict(テーマチップ/バッジ/理由つき)。
@@ -35,7 +35,7 @@ LARGE_CAPS_24: list[tuple[str, str]] = [
 
 NEWS_WEIGHT = 0.3      # 総合スコアに占めるニュース関連度の重み
 CHART_WEIGHT = 0.7
-MIN_NEWS_IN_TOP5 = 2   # 上位5件に必ず含めるニュース関連銘柄の数
+MIN_NEWS_IN_TOP5 = 2   # 上位5件に必ず含める波及銘柄の数
 TOP_N = 5
 
 
@@ -106,27 +106,29 @@ def get_recommendations(mock: bool = False, top_n: int = TOP_N) -> dict:
       "themes": [ {"theme": "半導体", "score": 5,
                    "headline": "...", "headline_link": "..."} , ... ],
       "recommendations": [
-          {"code": "3436", "name": "SUMCO",
+          {"code": "6367", "name": "ダイキン工業",
            "total_score": 78.5, "chart_score": 72.0, "news_score": 5,
-           "badges": ["ニュース関連", "テーマ株"],
-           "themes": ["半導体"],
-           "reason": "ニュース関連(半導体): 短期線が長期線を上回る、出来高が急増。…"},
+           "badges": ["波及銘柄", "テーマ株"],
+           "chains": ["AI → 冷却・空調設備"],
+           "reason": "波及銘柄(AI → 冷却・空調設備): AI需要拡大→データセンター増設→
+                      サーバー冷却(液冷・空調)需要。チャート: 短期線が長期線を上回る"},
           ...
       ]
     }
     """
-    # --- 1. ニュース分析 ---
-    _, themes, news_candidates = run_news_analysis(mock=mock)
-    max_news = max((c["news_score"] for c in news_candidates.values()), default=1)
+    # --- 1. ニュース分析(テーマ判定 → 波及銘柄の抽出) ---
+    _, themes, ripple_candidates = run_news_analysis(mock=mock)
+    max_news = max((c["news_score"] for c in ripple_candidates.values()), default=1)
 
-    # --- 2. 候補プール = 大型株24 + ニュース浮上銘柄 ---
+    # --- 2. 候補プール = 大型株24 + ニュースからの波及銘柄 ---
     pool: dict[str, dict] = {}
     for code, name in LARGE_CAPS_24:
         pool[code] = {"name": name, "is_large": True}
-    for code, c in news_candidates.items():
+    for code, c in ripple_candidates.items():
         entry = pool.setdefault(code, {"name": c["name"], "is_large": False})
         entry.update({
-            "themes": c["themes"],
+            "chains": c["chains"],      # 例: ["AI → 冷却・空調設備"]
+            "logic": c["logic"],        # 例: "AI需要拡大→DC増設→冷却需要"
             "news_score": c["news_score"],
             "headline": c["headline"],
         })
@@ -142,14 +144,15 @@ def get_recommendations(mock: bool = False, top_n: int = TOP_N) -> dict:
         is_news = n_score_raw > 0
         badges = []
         if is_news:
-            badges.append("ニュース関連")
+            badges.append("波及銘柄")
         if is_news and not info.get("is_large", False):
             badges.append("テーマ株")
 
-        theme_label = "・".join(info.get("themes", []))
+        chains = info.get("chains", [])
         if is_news:
-            head = (info.get("headline") or "")[:40]
-            reason = f"ニュース関連({theme_label}): {c_reason}。参考: {head}…"
+            chain_label = " / ".join(chains[:2])
+            reason = (f"波及銘柄({chain_label}): {info.get('logic', '')}。"
+                      f"チャート: {c_reason}")
         else:
             reason = f"チャート分析: {c_reason}"
 
@@ -160,19 +163,19 @@ def get_recommendations(mock: bool = False, top_n: int = TOP_N) -> dict:
             "news_score": n_score_raw,
             "is_news": is_news,
             "badges": badges,
-            "themes": info.get("themes", []),
+            "chains": chains,
+            "headline": info.get("headline", ""),
             "reason": reason,
         })
     scored.sort(key=lambda x: x["total_score"], reverse=True)
 
-    # --- 4. 上位N件に「ニュース関連」を最低2件含める ---
+    # --- 4. 上位N件に「波及銘柄」を最低2件含める ---
     top = scored[:top_n]
     news_in_top = sum(1 for s in top if s["is_news"])
     if news_in_top < MIN_NEWS_IN_TOP5:
         extra_news = [s for s in scored[top_n:] if s["is_news"]]
         need = MIN_NEWS_IN_TOP5 - news_in_top
         for repl in extra_news[:need]:
-            # スコア最下位の「非ニュース銘柄」を入れ替える
             for i in range(len(top) - 1, -1, -1):
                 if not top[i]["is_news"]:
                     top[i] = repl
@@ -202,4 +205,4 @@ if __name__ == "__main__":
         print(f"  {r['code']} {r['name']:<14} 総合{r['total_score']:>5} {badge}")
         print(f"      └ {r['reason']}")
     news_count = sum(1 for r in result["recommendations"] if r["is_news"])
-    print(f"\n  ニュース関連: {news_count}件 (最低{MIN_NEWS_IN_TOP5}件ルール)")
+    print(f"\n  波及銘柄: {news_count}件 (最低{MIN_NEWS_IN_TOP5}件ルール)")

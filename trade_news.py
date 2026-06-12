@@ -1,13 +1,20 @@
 # -*- coding: utf-8 -*-
 """
-trade_news.py — ニュース分析モジュール(APIキー不要)
+trade_news.py — ニュース分析モジュール v2(波及銘柄方式・APIキー不要)
 
-  1. Google News RSS と yfinance から市場ニュース見出しを取得
-  2. 見出しのキーワードからテーマを自動判定(半導体/AI/自動車/防衛/医薬/...)
-  3. テーマごとの銘柄マップ(中型株含む)から「ニュース浮上銘柄」を返す
+考え方:
+  ニュースで「AI」が話題 → AIの銘柄そのものではなく、
+  「データセンター増設 → 冷却液・空調」「電力需要 → 電線・変圧器」のように
+  一歩先で恩恵を受ける【波及銘柄】を提案する。
 
-単体テスト:  python trade_news.py            (実際にRSSを取得して表示)
-オフライン:  python trade_news.py --mock     (サンプル見出しで動作確認)
+構造:
+  THEME_MAP[テーマ] = {
+      keywords: ニュース見出しの判定キーワード,
+      derived:  [ {label: 波及先, logic: 連想チェーンの説明, stocks: [...]}, ... ]
+  }
+
+単体テスト:  python trade_news.py            (実際にRSSを取得)
+オフライン:  python trade_news.py --mock     (サンプル見出しで確認)
 """
 
 from __future__ import annotations
@@ -23,106 +30,189 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
 # ============================================================
-# テーマ定義: キーワード + 関連銘柄マップ(中型株を含む)
+# テーマ → 波及チェーン → 銘柄マップ(中型株を含む)
+#   logic は「なぜその銘柄に波及するか」の連想を書く。理由文にそのまま使う。
 # ============================================================
 
 THEME_MAP: dict[str, dict] = {
-    "半導体": {
-        "keywords": ["半導体", "チップ", "TSMC", "エヌビディア", "NVIDIA", "ファウンドリ",
-                     "シリコンウエハ", "露光", "後工程", "HBM", "メモリ", "DRAM", "NAND"],
-        "stocks": [
-            ("8035", "東京エレクトロン"), ("6857", "アドバンテスト"),
-            ("6146", "ディスコ"), ("6920", "レーザーテック"),
-            ("6723", "ルネサスエレクトロニクス"), ("3436", "SUMCO"),
-            ("7735", "SCREENホールディングス"), ("6963", "ローム"),
-        ],
-    },
     "AI": {
         "keywords": ["AI", "人工知能", "生成AI", "ChatGPT", "Claude", "LLM",
-                     "データセンター", "機械学習", "クラウド"],
-        "stocks": [
-            ("9613", "NTTデータグループ"), ("3993", "PKSHA Technology"),
-            ("4382", "HEROZ"), ("6701", "NEC"), ("6702", "富士通"),
-            ("3655", "ブレインパッド"), ("4180", "Appier Group"),
+                     "エヌビディア", "NVIDIA", "データセンター", "機械学習"],
+        "derived": [
+            {"label": "冷却・空調設備",
+             "logic": "AI需要拡大→データセンター増設→サーバー冷却(液冷・空調)需要",
+             "stocks": [("6367", "ダイキン工業"), ("6504", "富士電機"),
+                        ("1969", "高砂熱学工業"), ("6458", "新晃工業")]},
+            {"label": "電線・電力ケーブル",
+             "logic": "データセンター増設→電力供給網の増強→電線需要",
+             "stocks": [("5803", "フジクラ"), ("5801", "古河電気工業"),
+                        ("5802", "住友電気工業")]},
+            {"label": "DC建設・電気工事",
+             "logic": "データセンター新設ラッシュ→建設・電気設備工事の受注増",
+             "stocks": [("1944", "きんでん"), ("1959", "九電工"),
+                        ("1721", "コムシスHD")]},
+            {"label": "変圧器・受電設備",
+             "logic": "AIサーバーの大電力消費→受変電設備の更新需要",
+             "stocks": [("6617", "東光高岳"), ("6622", "ダイヘン"),
+                        ("6503", "三菱電機")]},
         ],
     },
-    "自動車": {
+    "半導体": {
+        "keywords": ["半導体", "チップ", "TSMC", "ファウンドリ", "露光",
+                     "後工程", "HBM", "メモリ", "DRAM", "NAND", "ラピダス"],
+        "derived": [
+            {"label": "シリコンウエハ",
+             "logic": "半導体増産→上流のウエハ需要が先行して増える",
+             "stocks": [("3436", "SUMCO"), ("4063", "信越化学工業")]},
+            {"label": "後工程・検査装置",
+             "logic": "チップ高性能化→切断・研磨・検査の工程価値が上昇",
+             "stocks": [("6146", "ディスコ"), ("6857", "アドバンテスト"),
+                        ("6920", "レーザーテック")]},
+            {"label": "半導体材料・薬品",
+             "logic": "工場稼働率上昇→フォトレジスト・薬液の消耗品需要",
+             "stocks": [("4186", "東京応化工業"), ("4004", "レゾナックHD"),
+                        ("5214", "日本電気硝子")]},
+            {"label": "搬送・クリーンルーム",
+             "logic": "新工場建設(熊本・北海道など)→搬送装置と空調設備",
+             "stocks": [("6383", "ダイフク"), ("1969", "高砂熱学工業"),
+                        ("6135", "牧野フライス製作所")]},
+        ],
+    },
+    "自動車・EV": {
         "keywords": ["自動車", "EV", "電気自動車", "トヨタ", "ホンダ", "日産",
                      "車載", "自動運転", "ハイブリッド", "関税"],
-        "stocks": [
-            ("7203", "トヨタ自動車"), ("7267", "ホンダ"), ("7201", "日産自動車"),
-            ("7269", "スズキ"), ("6902", "デンソー"), ("7259", "アイシン"),
-            ("5108", "ブリヂストン"),
+        "derived": [
+            {"label": "車載電池・素材",
+             "logic": "EVシフト→電池とニッケル・リチウム等の素材需要",
+             "stocks": [("6674", "GSユアサ"), ("5713", "住友金属鉱山"),
+                        ("6752", "パナソニックHD")]},
+            {"label": "モーター・駆動部品",
+             "logic": "EV化→エンジンからモーター・インバーターへ置き換え",
+             "stocks": [("6594", "ニデック"), ("6902", "デンソー"),
+                        ("7259", "アイシン")]},
+            {"label": "充電インフラ",
+             "logic": "EV普及→充電スタンド・急速充電器の整備需要",
+             "stocks": [("6617", "東光高岳"), ("6644", "大崎電気工業")]},
         ],
     },
     "防衛": {
         "keywords": ["防衛", "防衛費", "安全保障", "ミサイル", "自衛隊", "軍事",
                      "地政学", "NATO"],
-        "stocks": [
-            ("7011", "三菱重工業"), ("7013", "IHI"), ("7012", "川崎重工業"),
-            ("6203", "豊和工業"), ("6208", "石川製作所"), ("6946", "日本アビオニクス"),
+        "derived": [
+            {"label": "重工・装備品",
+             "logic": "防衛費増額→装備品・艦艇・航空機の受注増",
+             "stocks": [("7011", "三菱重工業"), ("7013", "IHI"),
+                        ("7012", "川崎重工業")]},
+            {"label": "電子・通信機器",
+             "logic": "防衛のデジタル化→レーダー・通信・電子戦装備",
+             "stocks": [("6503", "三菱電機"), ("6946", "日本アビオニクス"),
+                        ("7947", "エフピコ")]},
+            {"label": "素材(炭素繊維等)",
+             "logic": "航空・防衛装備→軽量高強度素材の需要",
+             "stocks": [("3402", "東レ"), ("5301", "東海カーボン")]},
         ],
     },
     "医薬・ヘルスケア": {
         "keywords": ["医薬", "新薬", "治験", "承認", "ワクチン", "がん", "創薬",
                      "バイオ", "厚労省"],
-        "stocks": [
-            ("4568", "第一三共"), ("4502", "武田薬品工業"), ("4503", "アステラス製薬"),
-            ("4519", "中外製薬"), ("4587", "ペプチドリーム"), ("4565", "そーせいグループ"),
+        "derived": [
+            {"label": "医薬品受託製造(CDMO)",
+             "logic": "新薬承認ラッシュ→製造を受託する企業に量産需要",
+             "stocks": [("4901", "富士フイルムHD"), ("4581", "大正製薬HD")]},
+            {"label": "治験・開発支援",
+             "logic": "創薬活発化→治験運営・データ管理の外注増",
+             "stocks": [("2309", "シミックHD"), ("2160", "ジーエヌアイグループ")]},
+            {"label": "医療機器・検査",
+             "logic": "診断・治療の高度化→機器と検査試薬の需要",
+             "stocks": [("4543", "テルモ"), ("7733", "オリンパス"),
+                        ("6869", "シスメックス")]},
         ],
     },
-    "不動産・建設": {
+    "不動産・再開発": {
         "keywords": ["不動産", "地価", "再開発", "マンション", "建設", "ゼネコン",
                      "オフィスビル", "REIT"],
-        "stocks": [
-            ("8801", "三井不動産"), ("8802", "三菱地所"), ("3289", "東急不動産HD"),
-            ("1801", "大成建設"), ("1812", "鹿島建設"), ("1928", "積水ハウス"),
+        "derived": [
+            {"label": "建設機械",
+             "logic": "再開発・着工増→建機の稼働率とレンタル需要",
+             "stocks": [("6301", "コマツ"), ("6305", "日立建機"),
+                        ("9678", "カナモト")]},
+            {"label": "セメント・建材",
+             "logic": "着工増→セメント・ガラス・建材の出荷増",
+             "stocks": [("5233", "太平洋セメント"), ("5201", "AGC"),
+                        ("5938", "LIXIL")]},
+            {"label": "電気設備工事",
+             "logic": "ビル新築→受変電・照明など電気設備工事の受注",
+             "stocks": [("1944", "きんでん"), ("1959", "九電工"),
+                        ("1942", "関電工")]},
         ],
     },
-    "エネルギー": {
-        "keywords": ["原油", "電力", "再生可能エネルギー", "太陽光", "原発", "原子力",
-                     "LNG", "脱炭素", "電気料金"],
-        "stocks": [
-            ("5020", "ENEOSホールディングス"), ("1605", "INPEX"),
-            ("9501", "東京電力HD"), ("9503", "関西電力"),
-            ("9519", "レノバ"), ("1407", "ウエストHD"),
+    "エネルギー・電力": {
+        "keywords": ["原油", "電力", "再生可能エネルギー", "太陽光", "原発",
+                     "原子力", "LNG", "脱炭素", "電気料金", "送電"],
+        "derived": [
+            {"label": "送配電・電線",
+             "logic": "電力需要増・再エネ接続→送配電網の増強投資",
+             "stocks": [("5803", "フジクラ"), ("5801", "古河電気工業"),
+                        ("6617", "東光高岳")]},
+            {"label": "原発再稼働関連",
+             "logic": "原発再稼働→保守・部材・計測機器の需要",
+             "stocks": [("7011", "三菱重工業"), ("7711", "助川電気工業"),
+                        ("1963", "日揮HD")]},
+            {"label": "電力工事",
+             "logic": "送電網・再エネ設備の建設→電気工事会社の受注",
+             "stocks": [("1959", "九電工"), ("1942", "関電工"),
+                        ("1407", "ウエストHD")]},
         ],
     },
-    "金融": {
-        "keywords": ["日銀", "利上げ", "金利", "為替", "円安", "円高", "銀行",
+    "金融・金利": {
+        "keywords": ["日銀", "利上げ", "金利", "為替", "円安", "円高",
                      "メガバンク", "金融政策"],
-        "stocks": [
-            ("8306", "三菱UFJ FG"), ("8316", "三井住友FG"), ("8411", "みずほFG"),
-            ("8591", "オリックス"), ("8604", "野村ホールディングス"), ("7186", "コンコルディアFG"),
+        "derived": [
+            {"label": "保険(運用利回り改善)",
+             "logic": "金利上昇→保険会社の運用利回りが改善",
+             "stocks": [("8766", "東京海上HD"), ("8750", "第一生命HD"),
+                        ("8725", "MS&ADインシュアランス")]},
+            {"label": "地方銀行",
+             "logic": "利上げ→貸出金利の改善がメガバンクより大きく効く",
+             "stocks": [("7186", "コンコルディアFG"), ("8331", "千葉銀行"),
+                        ("8354", "ふくおかFG")]},
+        ],
+    },
+    "インバウンド・観光": {
+        "keywords": ["インバウンド", "訪日", "観光", "百貨店", "免税", "ホテル",
+                     "旅行"],
+        "derived": [
+            {"label": "化粧品・日用品",
+             "logic": "訪日客増→免税売上で化粧品・ドラッグストアが恩恵",
+             "stocks": [("4911", "資生堂"), ("4452", "花王"),
+                        ("3088", "マツキヨココカラ&カンパニー")]},
+            {"label": "鉄道・交通",
+             "logic": "観光移動の増加→新幹線・私鉄の利用増",
+             "stocks": [("9022", "JR東海"), ("9020", "JR東日本"),
+                        ("9041", "近鉄グループHD")]},
+            {"label": "ホテル・レジャー",
+             "logic": "宿泊需要逼迫→客室単価の上昇が利益に直結",
+             "stocks": [("9616", "共立メンテナンス"), ("4661", "オリエンタルランド"),
+                        ("6191", "エアトリ")]},
         ],
     },
     "ゲーム・エンタメ": {
         "keywords": ["ゲーム", "任天堂", "Switch", "プレイステーション", "アニメ",
                      "eスポーツ", "配信"],
-        "stocks": [
-            ("7974", "任天堂"), ("6758", "ソニーグループ"), ("9684", "スクウェア・エニックスHD"),
-            ("3659", "ネクソン"), ("9468", "KADOKAWA"), ("2432", "ディー・エヌ・エー"),
-        ],
-    },
-    "商社・資源": {
-        "keywords": ["商社", "資源", "鉄鉱石", "銅", "バフェット", "穀物"],
-        "stocks": [
-            ("8058", "三菱商事"), ("8031", "三井物産"), ("8001", "伊藤忠商事"),
-            ("8002", "丸紅"), ("2768", "双日"),
-        ],
-    },
-    "インバウンド・小売": {
-        "keywords": ["インバウンド", "訪日", "観光", "百貨店", "免税", "ホテル", "旅行"],
-        "stocks": [
-            ("3099", "三越伊勢丹HD"), ("8233", "高島屋"), ("9603", "エイチ・アイ・エス"),
-            ("6191", "エアトリ"), ("4661", "オリエンタルランド"), ("9616", "共立メンテナンス"),
+        "derived": [
+            {"label": "電子部品・半導体",
+             "logic": "新型ゲーム機ヒット→搭載される部品・チップの出荷増",
+             "stocks": [("6526", "ソシオネクスト"), ("6981", "村田製作所"),
+                        ("6963", "ローム")]},
+            {"label": "IP・コンテンツ",
+             "logic": "ゲーム人気→アニメ化・グッズ化でIP保有企業が潤う",
+             "stocks": [("9468", "KADOKAWA"), ("7832", "バンダイナムコHD"),
+                        ("7552", "ハピネット")]},
         ],
     },
 }
 
-# Google News RSS の検索クエリ(広めに市場ニュースを拾う)
 NEWS_QUERIES = ["株式市場", "日経平均", "東証 株"]
-
 UA = {"User-Agent": "Mozilla/5.0 (TradeNewsBot; personal paper-trading demo)"}
 
 _CACHE_TTL_MIN = 30
@@ -144,9 +234,9 @@ class NewsItem:
 class ThemeResult:
     theme: str
     score: int                      # 見出しヒット数(重複加算)
-    headline: str                   # 参考見出し(最新ニュース1件)
+    headline: str                   # 参考見出し(最も強くヒットした1件)
     headline_link: str = ""
-    stocks: list = field(default_factory=list)   # [(code, name), ...]
+    derived: list = field(default_factory=list)
 
 
 # ============================================================
@@ -195,9 +285,11 @@ def fetch_yfinance_news(tickers: list[str] | None = None, limit_per: int = 5) ->
                 c = n.get("content", n)  # yfinanceのバージョン差を吸収
                 title = c.get("title") or ""
                 if title:
+                    link = ""
+                    cu = c.get("canonicalUrl")
+                    link = cu.get("url", "") if isinstance(cu, dict) else c.get("link", "")
                     items.append(NewsItem(
-                        title=title,
-                        link=(c.get("canonicalUrl") or {}).get("url", "") if isinstance(c.get("canonicalUrl"), dict) else c.get("link", ""),
+                        title=title, link=link,
                         published=str(c.get("pubDate") or c.get("providerPublishTime") or ""),
                         source=f"yfinance:{t}",
                     ))
@@ -223,7 +315,7 @@ def fetch_all_news() -> list[NewsItem]:
 
 
 # ============================================================
-# テーマ判定
+# テーマ判定 → 波及銘柄の抽出
 # ============================================================
 
 def analyze_themes(news: list[NewsItem], top_n: int = 4) -> list[ThemeResult]:
@@ -242,50 +334,61 @@ def analyze_themes(news: list[NewsItem], top_n: int = 4) -> list[ThemeResult]:
             results.append(ThemeResult(
                 theme=theme, score=score,
                 headline=headline, headline_link=link,
-                stocks=list(cfg["stocks"]),
+                derived=cfg["derived"],
             ))
     results.sort(key=lambda r: r.score, reverse=True)
     return results[:top_n]
 
 
-def get_news_candidates(themes: list[ThemeResult]) -> dict[str, dict]:
+def get_ripple_candidates(themes: list[ThemeResult]) -> dict[str, dict]:
     """
-    テーマ判定結果 → 銘柄候補の辞書
-    返り値: { "3436": {"name": "SUMCO", "themes": ["半導体"], "news_score": 5,
-                        "headline": "...", "headline_link": "..."} , ... }
+    テーマ判定結果 → 【波及銘柄】候補の辞書
+
+    返り値の例:
+      { "6367": {"name": "ダイキン工業",
+                 "chains": ["AI → 冷却・空調設備"],
+                 "logic": "AI需要拡大→データセンター増設→サーバー冷却需要",
+                 "news_score": 5,
+                 "headline": "...", "headline_link": "..."}, ... }
     """
     candidates: dict[str, dict] = {}
     for tr in themes:
-        for code, name in tr.stocks:
-            c = candidates.setdefault(code, {
-                "name": name, "themes": [], "news_score": 0,
-                "headline": tr.headline, "headline_link": tr.headline_link,
-            })
-            if tr.theme not in c["themes"]:
-                c["themes"].append(tr.theme)
-            c["news_score"] += tr.score
+        for grp in tr.derived:
+            chain = f"{tr.theme} → {grp['label']}"
+            for code, name in grp["stocks"]:
+                c = candidates.setdefault(code, {
+                    "name": name, "chains": [], "logic": grp["logic"],
+                    "news_score": 0,
+                    "headline": tr.headline, "headline_link": tr.headline_link,
+                })
+                if chain not in c["chains"]:
+                    c["chains"].append(chain)
+                c["news_score"] += tr.score
     return candidates
 
 
+# 後方互換エイリアス
+get_news_candidates = get_ripple_candidates
+
+
 def run(mock: bool = False):
-    """取得 → 分析 → 候補化 をまとめて実行。アプリ側はこれを呼ぶだけでOK。"""
+    """取得 → テーマ判定 → 波及銘柄抽出。アプリ側はこれを呼ぶだけでOK。"""
     if mock:
         news = [
-            NewsItem("半導体大手TSMC、熊本第2工場の建設を前倒し 関連株に買い"),
-            NewsItem("生成AI需要でデータセンター投資が加速、電力株にも波及"),
-            NewsItem("地価上昇続く 都心再開発で不動産大手が最高益"),
-            NewsItem("日銀、追加利上げを見送り 円安進行で銀行株はまちまち"),
-            NewsItem("新薬承認で第一三共が年初来高値 がん治療薬に期待"),
+            NewsItem("生成AI需要が急拡大 データセンター投資、過去最高を更新へ"),
+            NewsItem("エヌビディア決算が市場予想を上回る AI関連株に資金流入"),
+            NewsItem("訪日客が単月最高を更新 百貨店の免税売上が好調"),
+            NewsItem("日銀、追加利上げを見送り 金利先高観は維持"),
         ]
     else:
         news = fetch_all_news()
     themes = analyze_themes(news)
-    candidates = get_news_candidates(themes)
+    candidates = get_ripple_candidates(themes)
     return news, themes, candidates
 
 
 # ============================================================
-# アプリ連携用ラッパー (trade_recommend / server.py 向け)
+# アプリ連携用ラッパー
 # ============================================================
 
 def _cache_key(market: str) -> str:
@@ -317,13 +420,14 @@ def _save_cache(market: str, data: dict):
 
 
 def get_extended_universe(market: str = "jp") -> dict[str, str]:
-    """テーママップ内の全銘柄（中型株含む）"""
+    """波及マップ内の全銘柄（中型株含む）"""
     if market != "jp":
         return {}
     universe: dict[str, str] = {}
     for cfg in THEME_MAP.values():
-        for code, name in cfg["stocks"]:
-            universe[code] = name
+        for grp in cfg.get("derived", []):
+            for code, name in grp["stocks"]:
+                universe[code] = name
     return universe
 
 
@@ -341,24 +445,33 @@ def _build_context(news: list[NewsItem], themes: list[ThemeResult],
         headline = info.get("headline", "")
         ticker_map[code] = {
             "name": info["name"],
-            "themes": info.get("themes", []),
+            "chains": info.get("chains", []),
+            "themes": info.get("chains", []),
+            "logic": info.get("logic", ""),
             "news_score": info.get("news_score", 0),
             "headline": headline,
             "headline_link": info.get("headline_link", ""),
             "headlines": [headline] if headline else [],
         }
 
-    theme_list = [
-        {
+    theme_list = []
+    for tr in themes:
+        tickers = []
+        derived_labels = []
+        for grp in tr.derived:
+            derived_labels.append(grp["label"])
+            tickers.extend(code for code, _ in grp["stocks"])
+        theme_list.append({
             "id": tr.theme,
             "label": tr.theme,
+            "theme": tr.theme,
             "score": tr.score,
             "headlines": [tr.headline] if tr.headline else [],
+            "headline": tr.headline,
             "headline_link": tr.headline_link,
-            "tickers": [code for code, _ in tr.stocks],
-        }
-        for tr in themes
-    ]
+            "derived_labels": derived_labels,
+            "tickers": tickers,
+        })
 
     return {
         "headlines": [
@@ -398,6 +511,9 @@ if __name__ == "__main__":
     for t in themes:
         print(f"  [{t.theme}] score={t.score}")
         print(f"    参考見出し: {t.headline}")
-    print("\n=== ニュース浮上銘柄 ===")
+    print("\n=== 波及銘柄(連想チェーン) ===")
     for code, c in sorted(candidates.items(), key=lambda x: -x[1]["news_score"]):
-        print(f"  {code} {c['name']:<14} themes={c['themes']} score={c['news_score']}")
+        print(f"  {code} {c['name']:<14} score={c['news_score']}")
+        for ch in c["chains"]:
+            print(f"      -> {ch}")
+        print(f"      理由: {c['logic']}")

@@ -50,6 +50,9 @@ nav button span{display:block;font-size:18px;margin-bottom:2px}
 .reason{font-size:12px;color:#cbd5e1;line-height:1.5;margin:4px 0 4px 12px;list-style:disc}
 .rank-badge{font-size:11px;background:#1e3a5f;color:#93c5fd;padding:2px 8px;border-radius:999px}
 .news-badge{font-size:11px;background:#422006;color:#fcd34d;padding:2px 8px;border-radius:999px;margin-left:4px}
+.badge-ripple{font-size:11px;background:#451a03;color:#fca5a5;padding:2px 8px;border-radius:4px;margin-left:4px}
+.badge-theme{font-size:11px;background:#422006;color:#fcd34d;padding:2px 8px;border-radius:4px;margin-left:4px}
+.chain-line{font-size:12px;color:#93c5fd;font-weight:600;margin-top:6px}
 .theme-chip{display:inline-block;font-size:11px;background:#1e293b;border:1px solid var(--border);color:#cbd5e1;padding:4px 8px;border-radius:999px;margin:3px 4px 3px 0}
 .news-box{background:#0b1220;border:1px solid var(--border);border-radius:10px;padding:10px;margin-bottom:10px}
 .sell-row{display:flex;gap:8px;margin-top:10px}
@@ -93,7 +96,7 @@ nav button span{display:block;font-size:18px;margin-bottom:2px}
     </div>
     <div class="card">
       <h2>今日のおすすめ銘柄</h2>
-      <p class="hint">狙い銘柄がなくても大丈夫です。ニュースのテーマ + 大型株 + 中型テーマ株を分析し、今注目すべき銘柄を表示します。</p>
+      <p class="hint">狙い銘柄がなくても大丈夫です。ニュースから波及銘柄（一歩先の恩恵株）を連想し、チャートと合わせておすすめを表示します。</p>
       <button class="btn btn-primary" onclick="loadRecommend(true)">おすすめを更新</button>
       <div id="recommend-results"><div class="empty">「おすすめを更新」で銘柄と理由を表示</div></div>
     </div>
@@ -212,14 +215,20 @@ async function loadRecommend(force=false){
   h+='</div>';
   d.recommendations.forEach((r,i)=>{
     const code=r.code||r.ticker;
-    const badges=(r.badges||[]).map(b=>`<span class="news-badge">${b}</span>`).join('');
+    const badges=(r.badges||[]).map(b=>{
+      const cls=b==='波及銘柄'?'badge-ripple':'badge-theme';
+      return `<span class="${cls}">${b}</span>`;
+    }).join('');
+    const chainLine=(r.chains&&r.chains.length)
+      ?`<div class="chain-line">${r.chains.join(' / ')}</div>`:'';
     h+=`<div class="card" style="margin-top:8px">
       <div style="display:flex;justify-content:space-between;align-items:center">
         <div><span class="rank-badge">#${i+1}</span> <b>${code}</b> ${r.name||''}${badges}</div>
         <span class="score" style="color:#93c5fd;font-weight:700">${r.total_score}</span>
       </div>
       <div class="cond" style="margin-top:6px">チャート ${r.chart_score} / ニュース ${r.news_score||0}</div>
-      <div class="reason" style="margin-top:8px">${r.reason||(r.reasons&&r.reasons[0])||''}</div>
+      ${chainLine}
+      <div class="reason" style="margin-top:8px;list-style:none">${r.reason||(r.reasons&&r.reasons[0])||''}</div>
     </div>`;
   });
   el.innerHTML=h;
