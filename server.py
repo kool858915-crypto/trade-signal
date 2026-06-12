@@ -123,6 +123,12 @@ class AppHandler(BaseHTTPRequestHandler):
             _json_response(self, tc.action_validate(market, style))
         elif path == "/api/journal":
             _json_response(self, tc.action_journal(market, style))
+        elif path == "/api/signal-lag":
+            try:
+                import signal_lag as sl
+                _json_response(self, sl.get_lag_report())
+            except Exception as e:
+                _json_response(self, {"error": str(e)}, 500)
         elif path == "/api/recommendations":
             try:
                 import app_integration as ai
@@ -210,6 +216,13 @@ def _monitor_loop():
 
 def run(host: str = "0.0.0.0", port: int | None = None):
     port = port or int(os.environ.get("PORT", "8765"))
+    try:
+        import signal_lag as sl
+        updated = sl.update_pending()
+        if updated:
+            print(f"  出遅れコスト: {updated}件の答え合わせを更新")
+    except Exception:
+        pass
     monitor = threading.Thread(target=_monitor_loop, daemon=True)
     monitor.start()
 

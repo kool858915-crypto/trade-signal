@@ -619,6 +619,8 @@ def action_scan(market: str = "jp", style: str = "day", tickers=None) -> dict:
             _log_signal(sid, market, style, code, r)
 
     demo_entries = _process_demo_entries(market, style, results)
+    if market == "jp" and demo_mode_enabled():
+        _record_signal_lag_on_scan(results)
     return {
         "scanned_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
         "market": market,
@@ -627,6 +629,20 @@ def action_scan(market: str = "jp", style: str = "day", tickers=None) -> dict:
         "results": results,
         "demo_entries": demo_entries,
     }
+
+
+def _record_signal_lag_on_scan(results: list):
+    """買いシグナル検出時に出遅れコストをライブ記録"""
+    try:
+        import signal_lag as sl
+        for item in results:
+            if item.get("signal") != "買い" or item.get("error"):
+                continue
+            ticker = str(item["ticker"]).upper()
+            name = item.get("name", "")
+            sl.record_live_signal(ticker, name)
+    except Exception:
+        pass
 
 
 def _process_demo_entries(market: str, style: str, results: list) -> list:

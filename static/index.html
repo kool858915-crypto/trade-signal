@@ -143,6 +143,12 @@ nav button span{display:block;font-size:18px;margin-bottom:2px}
     </div>
     <div id="validate-content"></div>
     <div id="journal-content"></div>
+    <div class="card" style="margin-top:12px">
+      <h2>出遅れコスト</h2>
+      <p class="hint">サイン発生時に既に何%上がっていたかを記録。SMA5/25とSMA50/200の比較に使います。</p>
+      <button class="btn btn-secondary" onclick="loadSignalLag()">更新</button>
+    </div>
+    <div id="signal-lag-content"></div>
   </section>
 </main>
 <nav>
@@ -170,7 +176,7 @@ function login(){pin=document.getElementById('pin-input').value;if(!pin)return;l
 function onContextChange(){market=document.getElementById('sel-market').value;style=document.getElementById('sel-style').value;localStorage.setItem(CTX_KEY,JSON.stringify({market,style}));refreshStatus();loadRecommend();}
 async function api(path,opts={}){const sep=path.includes('?')?'&':'?';const url=path.startsWith('/api/')?path+sep+ctxQs():path;const h={'X-Pin':pin,...opts.headers||{}};if(opts.body)h['Content-Type']='application/json';const r=await fetch(url,{...opts,headers:h});if(r.status===401){localStorage.removeItem(PIN_KEY);location.reload();return null;}return r.json();}
 async function apiPost(path,body){const d=await api(path,{method:'POST',body:body?JSON.stringify(body):undefined});if(!d)return;if(d.message)toast(d.message);if(d.error)toast(d.error);refreshStatus();return d;}
-function showPanel(n){document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));document.getElementById('panel-'+n).classList.add('active');document.querySelectorAll('nav button').forEach(b=>b.classList.toggle('active',b.dataset.panel===n));if(n==='review'){loadReview();loadJournal();}}
+function showPanel(n){document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));document.getElementById('panel-'+n).classList.add('active');document.querySelectorAll('nav button').forEach(b=>b.classList.toggle('active',b.dataset.panel===n));if(n==='review'){loadReview();loadJournal();loadSignalLag();}}
 function goScan(){showPanel('scan');runScan();}
 function goPositions(){showPanel('positions');loadPositions();}
 function sigCls(s){return s==='買い'?'signal-buy':s==='売り'?'signal-sell':'signal-wait';}
@@ -342,6 +348,36 @@ async function loadValidate(){
     });
     h+='</div>';
   }
+  el.innerHTML=h;
+}
+async function loadSignalLag(){
+  const el=document.getElementById('signal-lag-content');
+  if(!el)return;
+  const d=await api('/api/signal-lag');if(!d)return;
+  if(d.error){el.innerHTML=`<div class="empty">${d.error}</div>`;return;}
+  let h='';
+  if(d.rules&&d.rules.length){
+    h+='<div class="card"><h2>ルール別集計</h2>';
+    d.rules.forEach(r=>{
+      const lag=r.avg_lag!=null?r.avg_lag+'%':'-';
+      const win=r.win_rate!=null?r.win_rate+'%':'-';
+      const fwd=r.avg_fwd20!=null?(r.avg_fwd20>=0?'+':'')+r.avg_fwd20+'%':'-';
+      h+=`<div class="stat"><span>${r.rule}</span><span>出遅れ${lag} / 勝率${win} / 20日${fwd}</span></div>`;
+      h+=`<div class="cond">確定${r.settled}件 / 待ち${r.pending}件</div>`;
+    });
+    h+='</div>';
+  }
+  if(d.recent&&d.recent.length){
+    h+='<div class="card"><h2>直近サイン</h2>';
+    d.recent.forEach(r=>{
+      const f5=r.fwd5!=null?(r.fwd5>=0?'+':'')+r.fwd5+'%':'-';
+      const f20=r.fwd20!=null?(r.fwd20>=0?'+':'')+r.fwd20+'%':'-';
+      h+=`<div class="stat"><span>${r.code} ${r.date}</span><span>出遅れ${r.lag_cost}%</span></div>`;
+      h+=`<div class="cond">${r.rule} / 5日${f5} / 20日${f20} / ${r.status}</div>`;
+    });
+    h+='</div>';
+  }
+  if(!h)h='<div class="empty">まだ記録がありません（デモ取引で買いシグナル時に自動記録）</div>';
   el.innerHTML=h;
 }
 async function loadJournal(){
