@@ -40,7 +40,20 @@ input{width:100%;padding:14px;border:1px solid var(--border);border-radius:10px;
 nav{position:fixed;bottom:0;left:0;right:0;background:var(--card);border-top:1px solid var(--border);display:flex;padding:6px 2px calc(6px + env(safe-area-inset-bottom))}
 nav button{flex:1;background:none;border:none;color:var(--muted);font-size:10px;padding:8px 2px;cursor:pointer}
 nav button.active{color:var(--accent)}
-nav button span{display:block;font-size:18px;margin-bottom:2px}
+nav button span{display:block;font-size:16px;margin-bottom:2px}
+nav button{font-size:9px}
+.chain-flow{display:flex;align-items:center;flex-wrap:wrap;gap:4px;margin:8px 0;font-size:11px}
+.chain-box{background:#0b1220;border:1px solid var(--border);padding:6px 8px;border-radius:6px}
+.chain-arrow{color:#93c5fd}
+.bar-row{display:flex;align-items:center;gap:8px;margin:6px 0;font-size:12px}
+.bar-track{flex:1;height:8px;background:#0b1220;border-radius:4px;overflow:hidden}
+.bar-fill{height:100%;background:#3b82f6;border-radius:4px}
+.setting-row{display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid var(--border)}
+.setting-row:last-child{border:none}
+.toggle{width:44px;height:24px;border-radius:12px;background:var(--border);border:none;position:relative;cursor:pointer}
+.toggle.on{background:#22c55e}
+.toggle::after{content:'';position:absolute;top:3px;left:3px;width:18px;height:18px;border-radius:50%;background:#fff;transition:.2s}
+.toggle.on::after{left:23px}
 #login-screen{position:fixed;inset:0;background:var(--bg);z-index:100;display:flex;align-items:center;justify-content:center;padding:24px}
 #login-screen.hidden{display:none}
 .toast{position:fixed;top:70px;left:50%;transform:translateX(-50%);background:#334155;color:#fff;padding:12px 20px;border-radius:10px;font-size:14px;z-index:50;opacity:0;transition:opacity .3s;pointer-events:none;max-width:90%;text-align:center}
@@ -171,6 +184,11 @@ nav button span{display:block;font-size:18px;margin-bottom:2px}
       <button class="btn btn-secondary" onclick="loadSignalLag()">更新</button>
     </div>
     <div id="signal-lag-content"></div>
+    <div class="card" style="margin-top:12px">
+      <h2>条件別分析</h2>
+      <button class="btn btn-secondary" onclick="loadConditionStats()">更新</button>
+    </div>
+    <div id="condition-stats-content"></div>
   </section>
   <section class="panel" id="panel-history">
     <div class="card">
@@ -194,14 +212,40 @@ nav button span{display:block;font-size:18px;margin-bottom:2px}
     </div>
     <div id="history-list"><div class="empty">履歴がありません</div></div>
   </section>
+  <section class="panel" id="panel-news">
+    <div class="card">
+      <h2>ニュース・波及銘柄</h2>
+      <p class="hint">テーマ → 波及先 → 銘柄の連想チェーン</p>
+      <button class="btn btn-primary" onclick="loadNews(true)">更新</button>
+    </div>
+    <div id="news-content"><div class="empty">読み込み中...</div></div>
+  </section>
+  <section class="panel" id="panel-settings">
+    <div class="card">
+      <h2>設定</h2>
+      <div id="settings-content"><div class="loading">読み込み中...</div></div>
+      <button class="btn btn-secondary" style="margin-top:12px" onclick="loadSettings()">再読み込み</button>
+      <button class="btn btn-primary" style="margin-top:8px" onclick="testNotify('test')">通知テスト</button>
+      <button class="btn btn-secondary" style="margin-top:8px" onclick="testNotify('production_signal')">本番通知テスト</button>
+    </div>
+    <div class="card">
+      <h2>ウォッチリスト</h2>
+      <div class="filter-row">
+        <input id="wl-code" type="text" placeholder="銘柄追加">
+        <button class="btn btn-secondary" style="margin:0;width:auto;padding:10px 14px" onclick="addWatchlist()">追加</button>
+      </div>
+      <div id="watchlist-content"></div>
+    </div>
+  </section>
 </main>
 <nav>
   <button class="active" data-panel="home" onclick="showPanel('home')"><span>🏠</span>ホーム</button>
   <button data-panel="scan" onclick="showPanel('scan')"><span>📊</span>スキャン</button>
+  <button data-panel="news" onclick="showPanel('news')"><span>📰</span>ニュース</button>
   <button data-panel="history" onclick="showPanel('history')"><span>🕐</span>履歴</button>
   <button data-panel="positions" onclick="showPanel('positions')"><span>📋</span>建玉</button>
-  <button data-panel="entry" onclick="showPanel('entry')"><span>✏️</span>記録</button>
   <button data-panel="review" onclick="showPanel('review')"><span>📈</span>成績</button>
+  <button data-panel="settings" onclick="showPanel('settings')"><span>⚙️</span>設定</button>
 </nav>
 <script>
 const PIN_KEY='trade_pin';
@@ -223,7 +267,7 @@ async function api(path,opts={}){const sep=path.includes('?')?'&':'?';const url=
 async function apiPost(path,body){const d=await api(path,{method:'POST',body:body?JSON.stringify(body):undefined});if(!d)return;if(d.message)toast(d.message);if(d.error)toast(d.error);refreshStatus();return d;}
 let perfMode='compare';
 function setPerfMode(m){perfMode=m;document.querySelectorAll('.mode-tabs button').forEach(b=>b.classList.toggle('active',b.dataset.mode===m));loadReview();}
-function showPanel(n){document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));document.getElementById('panel-'+n).classList.add('active');document.querySelectorAll('nav button').forEach(b=>b.classList.toggle('active',b.dataset.panel===n));if(n==='review'){loadReview();loadJournal();loadSignalLag();}if(n==='history')loadSignalHistory();}
+function showPanel(n){document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));document.getElementById('panel-'+n).classList.add('active');document.querySelectorAll('nav button').forEach(b=>b.classList.toggle('active',b.dataset.panel===n));if(n==='review'){loadReview();loadJournal();loadSignalLag();loadConditionStats();}if(n==='history')loadSignalHistory();if(n==='news')loadNews();if(n==='settings'){loadSettings();loadWatchlist();}}
 function goScan(){showPanel('scan');runScan();}
 function goPositions(){showPanel('positions');loadPositions();}
 function sigCls(s){return s==='買い'?'signal-buy':s==='売り'?'signal-sell':'signal-wait';}
@@ -249,7 +293,13 @@ async function loadRecommend(force=false){
     const d=await api('/api/recommend');if(!d)return;
     if(!d.recommendations||!d.recommendations.length){el.innerHTML='<div class="empty">おすすめ銘柄がありません</div>';return;}
     currentCodes=d.recommendations.map(r=>r.ticker).filter(Boolean);
-    el.innerHTML=d.recommendations.map((r,i)=>`<div class="card"><b>#${i+1} ${r.ticker}</b> ${r.name||''} — ${r.signal||'様子見'}</div>`).join('');
+    el.innerHTML=d.recommendations.map((r,i)=>{
+      let h=`<div class="card"><b>#${i+1} ${r.ticker}</b> ${r.name||''} — ${r.signal||'様子見'}`;
+      if(r.avg_lag_pct!=null)h+=`<div class="cond">平均出遅れ ${r.avg_lag_pct}%</div>`;
+      if(r.backtest)h+=`<div class="cond">直近1ヶ月: ${r.backtest.wins}勝${r.backtest.losses}敗</div>`;
+      if(r.reasons&&r.reasons[0])h+=`<div class="reason">${r.reasons[0]}</div>`;
+      return h+'</div>';
+    }).join('');
     refreshStatus();return;
   }
   el.innerHTML='<div class="loading">チャート+ニュースを分析中...（1分ほどかかる場合があります）</div>';
@@ -261,7 +311,7 @@ async function loadRecommend(force=false){
   let h=`<p class="hint" style="margin-bottom:10px">チャート70% + ニュース30%で選定${d.cached?' (キャッシュ)':''}</p>`;
   h+=`<div class="news-box"><div class="cond" style="margin-bottom:6px">本日のニューステーマ</div>`;
   if(d.themes&&d.themes.length){
-    d.themes.forEach(t=>{h+=`<span class="theme-chip">${t.theme}</span>`;});
+    d.themes.forEach(t=>{h+=`<span class="theme-chip" style="cursor:pointer" onclick="goNewsTheme('${t.theme}')">${t.theme}</span>`;});
     if(d.themes[0].headline){
       h+=`<div class="cond" style="margin-top:8px">参考見出し: ${d.themes[0].headline}</div>`;
     }
@@ -283,6 +333,8 @@ async function loadRecommend(force=false){
         <span class="score" style="color:#93c5fd;font-weight:700">${r.total_score}</span>
       </div>
       <div class="cond" style="margin-top:6px">チャート ${r.chart_score} / ニュース ${r.news_score||0}</div>
+      ${r.avg_lag_pct!=null?`<div class="cond" style="color:${r.lag_warning?'#fca5a5':'#93c5fd'}">平均出遅れ ${r.avg_lag_pct}%${r.lag_warning?' ⚠️':''}</div>`:''}
+      ${r.backtest?`<div class="cond">直近1ヶ月(EMA9/21): ${r.backtest.wins}勝${r.backtest.losses}敗 勝率${r.backtest.win_rate}%</div>`:''}
       ${chainLine}
       <div class="reason" style="margin-top:8px;list-style:none">${r.reason||(r.reasons&&r.reasons[0])||''}</div>
     </div>`;
@@ -516,6 +568,91 @@ async function loadSignalHistory(){
       <div class="hist-detail">${detail}</div>
     </div>`;
   }).join('');
+}
+function goNewsTheme(theme){showPanel('news');loadNews(false,theme);}
+async function loadNews(refresh=false,focusTheme){
+  const el=document.getElementById('news-content');
+  el.innerHTML='<div class="loading">読み込み中...</div>';
+  const path='/api/news'+(refresh?'?refresh=1':'');
+  const d=await api(path);if(!d)return;
+  let h='';
+  const chains=d.theme_chains||[];
+  if(!chains.length){el.innerHTML='<div class="empty">テーマ未検出</div>';return;}
+  chains.forEach(tc=>{
+    if(focusTheme&&tc.theme!==focusTheme)return;
+    h+=`<div class="card"><div style="display:flex;justify-content:space-between"><b>${tc.theme}</b><span class="rank-badge">score ${tc.score}</span></div>`;
+    if(tc.headline)h+=`<div class="cond" style="margin-top:6px">${tc.headline}</div>`;
+    (tc.chains||[]).forEach(ch=>{
+      h+=`<div style="margin-top:10px"><div class="cond">${ch.logic}</div>`;
+      h+=`<div class="chain-flow"><span class="chain-box">${tc.theme}</span><span class="chain-arrow">→</span><span class="chain-box">${ch.label}</span><span class="chain-arrow">→</span>`;
+      (ch.stocks||[]).forEach((s,i)=>{if(i)h+='<span class="chain-arrow">/</span>';h+=`<span class="chain-box">${s.code}</span>`;});
+      h+='</div>';
+      (ch.stocks||[]).forEach(s=>{h+=`<div class="cond">${s.code} ${s.name}: ${ch.logic}</div>`;});
+      h+='</div>';
+    });
+    h+='</div>';
+  });
+  el.innerHTML=h||'<div class="empty">該当テーマなし</div>';
+}
+function renderToggle(id,on,fn){
+  return `<button class="toggle ${on?'on':''}" onclick="${fn}"></button>`;
+}
+async function loadSettings(){
+  const d=await api('/api/settings');if(!d||!d.settings)return;
+  const s=d.settings;
+  const el=document.getElementById('settings-content');
+  el.innerHTML=`
+    <div class="setting-row"><span>通知ON</span><button class="toggle ${s.notify_enabled==='1'?'on':''}" onclick="toggleSetting('notify_enabled')"></button></div>
+    <div class="setting-row"><span>デモ通知ON</span><button class="toggle ${s.demo_notify_enabled==='1'?'on':''}" onclick="toggleSetting('demo_notify_enabled')"></button></div>
+    <div class="setting-row"><span>[注意]のみ</span><button class="toggle ${s.alerts_only==='1'?'on':''}" onclick="toggleSetting('alerts_only')"></button></div>
+    <div class="setting-row"><span>おすすめ自動連携</span><button class="toggle ${s.reco_watchlist_sync==='1'?'on':''}" onclick="toggleSetting('reco_watchlist_sync')"></button></div>
+    <div class="setting-row"><span>週次レポート</span><button class="toggle ${s.weekly_report_enabled==='1'?'on':''}" onclick="toggleSetting('weekly_report_enabled')"></button></div>`;
+}
+async function toggleSetting(key){
+  const d=await api('/api/settings');if(!d)return;
+  const cur=d.settings[key]==='1';
+  await apiPost('/api/settings',{[key]:!cur});
+  loadSettings();refreshStatus();
+}
+async function testNotify(kind){
+  const d=await apiPost('/api/notify-test',{kind});
+  if(d&&d.ok)toast('通知送信');
+}
+async function loadWatchlist(){
+  const d=await api('/api/watchlist');if(!d)return;
+  const el=document.getElementById('watchlist-content');
+  if(!d.items||!d.items.length){el.innerHTML='<div class="empty">銘柄なし</div>';return;}
+  el.innerHTML=d.items.map(i=>`<div class="stat"><span>${i.code} ${i.name||''}</span><span class="cond">${i.source}</span></div>`).join('');
+}
+async function addWatchlist(){
+  const code=document.getElementById('wl-code').value.trim();
+  if(!code)return;
+  const d=await apiPost('/api/watchlist/add',{code});
+  if(d&&d.ok){toast(code+' 追加');document.getElementById('wl-code').value='';loadWatchlist();refreshStatus();}
+}
+async function loadConditionStats(){
+  const el=document.getElementById('condition-stats-content');
+  el.innerHTML='<div class="loading">分析中...</div>';
+  const d=await api('/api/condition_stats');if(!d)return;
+  let h='<div class="card">';
+  const cv=d.cross_volume||{};
+  if(cv.with_vol&&cv.with_vol.trades){
+    h+=`<div class="cond">クロス+出来高: 勝率${cv.with_vol.win_rate}% (${cv.with_vol.trades}回)</div>`;
+    h+=`<div class="bar-row"><span>出来高あり</span><div class="bar-track"><div class="bar-fill" style="width:${cv.with_vol.win_rate||0}%"></div></div></div>`;
+  }
+  if(cv.no_vol&&cv.no_vol.trades){
+    h+=`<div class="cond">クロスのみ: 勝率${cv.no_vol.win_rate}% (${cv.no_vol.trades}回)</div>`;
+    h+=`<div class="bar-row"><span>出来高なし</span><div class="bar-track"><div class="bar-fill" style="width:${cv.no_vol.win_rate||0}%"></div></div></div>`;
+  }
+  h+=`<div class="cond" style="margin-top:8px">min_score: ${d.current_min_score}</div></div>`;
+  if(d.score_history&&d.score_history.length){
+    h+='<div class="card"><h2>min_score 変更履歴</h2>';
+    d.score_history.forEach(sh=>{
+      h+=`<div class="cond">${sh.changed_at}: ${sh.old_min_score}→${sh.new_min_score} (${sh.reason||''})</div>`;
+    });
+    h+='</div>';
+  }
+  el.innerHTML=h;
 }
 async function loadJournal(){
   const el=document.getElementById('journal-content');

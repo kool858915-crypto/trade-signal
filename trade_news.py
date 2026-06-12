@@ -212,7 +212,56 @@ THEME_MAP: dict[str, dict] = {
     },
 }
 
+THEME_MAP_US: dict[str, dict] = {
+    "AI": {
+        "keywords": ["AI", "artificial intelligence", "NVIDIA", "data center",
+                     "ChatGPT", "LLM", "machine learning"],
+        "derived": [
+            {"label": "Cooling / HVAC",
+             "logic": "AI demand → data center buildout → cooling infrastructure",
+             "stocks": [("VRT", "Vertiv"), ("MOD", "Modine"), ("AAON", "AAON")]},
+            {"label": "Power / utilities",
+             "logic": "DC power demand → grid & generation beneficiaries",
+             "stocks": [("VST", "Vistra"), ("CEG", "Constellation"), ("NRG", "NRG Energy")]},
+            {"label": "DC REIT",
+             "logic": "Hyperscaler capex → data center real estate",
+             "stocks": [("DLR", "Digital Realty"), ("EQIX", "Equinix")]},
+        ],
+    },
+    "Semiconductor": {
+        "keywords": ["semiconductor", "chip", "TSMC", "HBM", "foundry", "memory"],
+        "derived": [
+            {"label": "Equipment",
+             "logic": "Fab expansion → lithography & etch tool demand",
+             "stocks": [("AMAT", "Applied Materials"), ("LRCX", "Lam Research"),
+                        ("KLAC", "KLA")]},
+            {"label": "Materials",
+             "logic": "Advanced nodes → specialty chemicals & materials",
+             "stocks": [("ENTG", "Entegris"), ("MKSI", "MKS Instruments")]},
+        ],
+    },
+    "Defense": {
+        "keywords": ["defense", "military", "NATO", "missile", "aerospace"],
+        "derived": [
+            {"label": "Prime contractors",
+             "logic": "Defense budget → platforms & systems orders",
+             "stocks": [("LMT", "Lockheed Martin"), ("RTX", "RTX"),
+                        ("NOC", "Northrop Grumman"), ("GD", "General Dynamics")]},
+        ],
+    },
+    "Healthcare": {
+        "keywords": ["pharma", "biotech", "FDA", "drug", "clinical trial"],
+        "derived": [
+            {"label": "Life science tools",
+             "logic": "R&D boom → instruments & CDMO demand",
+             "stocks": [("TMO", "Thermo Fisher"), ("DHR", "Danaher"),
+                        ("WST", "West Pharmaceutical")]},
+        ],
+    },
+}
+
 NEWS_QUERIES = ["株式市場", "日経平均", "東証 株"]
+NEWS_QUERIES_US = ["stock market", "NASDAQ", "S&P 500", "semiconductor stocks"]
 UA = {"User-Agent": "Mozilla/5.0 (TradeNewsBot; personal paper-trading demo)"}
 
 _CACHE_TTL_MIN = 30
@@ -243,11 +292,16 @@ class ThemeResult:
 # ニュース取得
 # ============================================================
 
-def fetch_google_news(query: str, limit: int = 20, timeout: int = 10) -> list[NewsItem]:
+def get_theme_map(market: str = "jp") -> dict:
+    return THEME_MAP_US if market == "us" else THEME_MAP
+
+
+def fetch_google_news(query: str, limit: int = 20, timeout: int = 10,
+                      hl: str = "ja", gl: str = "JP", ceid: str = "JP:ja") -> list[NewsItem]:
     """Google News RSS から見出しを取得(APIキー不要)"""
     url = ("https://news.google.com/rss/search?q="
            + urllib.parse.quote(query)
-           + "&hl=ja&gl=JP&ceid=JP:ja")
+           + f"&hl={hl}&gl={gl}&ceid={ceid}")
     try:
         req = urllib.request.Request(url, headers=UA)
         with urllib.request.urlopen(req, timeout=timeout) as r:
@@ -298,13 +352,19 @@ def fetch_yfinance_news(tickers: list[str] | None = None, limit_per: int = 5) ->
     return items
 
 
-def fetch_all_news() -> list[NewsItem]:
+def fetch_all_news(market: str = "jp") -> list[NewsItem]:
     """全ソースから取得して重複タイトルを除去"""
     items: list[NewsItem] = []
-    for q in NEWS_QUERIES:
-        items.extend(fetch_google_news(q))
-        time.sleep(0.5)  # 連続アクセスを避ける
-    items.extend(fetch_yfinance_news())
+    if market == "us":
+        for q in NEWS_QUERIES_US:
+            items.extend(fetch_google_news(q, hl="en-US", gl="US", ceid="US:en"))
+            time.sleep(0.5)
+        items.extend(fetch_yfinance_news(["^GSPC", "NVDA", "AAPL"]))
+    else:
+        for q in NEWS_QUERIES:
+            items.extend(fetch_google_news(q))
+            time.sleep(0.5)
+        items.extend(fetch_yfinance_news())
     seen, uniq = set(), []
     for it in items:
         key = re.sub(r"\s+", "", it.title)[:30]
@@ -318,10 +378,11 @@ def fetch_all_news() -> list[NewsItem]:
 # テーマ判定 → 波及銘柄の抽出
 # ============================================================
 
-def analyze_themes(news: list[NewsItem], top_n: int = 4) -> list[ThemeResult]:
+def analyze_themes(news: list[NewsItem], top_n: int = 4,
+                    market: str = "jp") -> list[ThemeResult]:
     """見出し群からテーマを判定し、スコア順に上位 top_n 件を返す"""
     results: list[ThemeResult] = []
-    for theme, cfg in THEME_MAP.items():
+    for theme, cfg in get_theme_map(market).items():
         score = 0
         headline, link, best_hits = "", "", 0
         for item in news:
@@ -371,18 +432,25 @@ def get_ripple_candidates(themes: list[ThemeResult]) -> dict[str, dict]:
 get_news_candidates = get_ripple_candidates
 
 
-def run(mock: bool = False):
+def run(mock: bool = False, market: str = "jp"):
     """取得 → テーマ判定 → 波及銘柄抽出。アプリ側はこれを呼ぶだけでOK。"""
     if mock:
-        news = [
-            NewsItem("生成AI需要が急拡大 データセンター投資、過去最高を更新へ"),
-            NewsItem("エヌビディア決算が市場予想を上回る AI関連株に資金流入"),
-            NewsItem("訪日客が単月最高を更新 百貨店の免税売上が好調"),
-            NewsItem("日銀、追加利上げを見送り 金利先高観は維持"),
-        ]
+        if market == "us":
+            news = [
+                NewsItem("AI data center spending hits record highs"),
+                NewsItem("NVIDIA beats earnings expectations"),
+                NewsItem("Defense budget increase proposed in Congress"),
+            ]
+        else:
+            news = [
+                NewsItem("生成AI需要が急拡大 データセンター投資、過去最高を更新へ"),
+                NewsItem("エヌビディア決算が市場予想を上回る AI関連株に資金流入"),
+                NewsItem("訪日客が単月最高を更新 百貨店の免税売上が好調"),
+                NewsItem("日銀、追加利上げを見送り 金利先高観は維持"),
+            ]
     else:
-        news = fetch_all_news()
-    themes = analyze_themes(news)
+        news = fetch_all_news(market)
+    themes = analyze_themes(news, market=market)
     candidates = get_ripple_candidates(themes)
     return news, themes, candidates
 
@@ -421,10 +489,8 @@ def _save_cache(market: str, data: dict):
 
 def get_extended_universe(market: str = "jp") -> dict[str, str]:
     """波及マップ内の全銘柄（中型株含む）"""
-    if market != "jp":
-        return {}
     universe: dict[str, str] = {}
-    for cfg in THEME_MAP.values():
+    for cfg in get_theme_map(market).values():
         for grp in cfg.get("derived", []):
             for code, name in grp["stocks"]:
                 universe[code] = name
@@ -485,20 +551,34 @@ def _build_context(news: list[NewsItem], themes: list[ThemeResult],
 
 
 def get_news_context(market: str = "jp", force_refresh: bool = False) -> dict:
-    """おすすめ銘柄モジュール向けのニュース分析結果（30分キャッシュ）"""
-    if market != "jp":
-        return {
-            "headlines": [], "themes": [], "ticker_map": {},
-            "active_theme_count": 0,
-        }
-
+    """ニュース分析結果（30分キャッシュ）JP/US 対応"""
     if not force_refresh:
         cached = _load_cache(market)
         if cached:
             return cached
 
-    news, themes, candidates = run(mock=False)
+    news, themes, candidates = run(mock=False, market=market)
     result = _build_context(news, themes, candidates)
+    result["market"] = market
+    for tr in themes:
+        for grp in tr.derived:
+            grp.setdefault("theme", tr.theme)
+    result["theme_chains"] = [
+        {
+            "theme": tr.theme,
+            "score": tr.score,
+            "headline": tr.headline,
+            "chains": [
+                {
+                    "label": grp["label"],
+                    "logic": grp["logic"],
+                    "stocks": [{"code": c, "name": n} for c, n in grp["stocks"]],
+                }
+                for grp in tr.derived
+            ],
+        }
+        for tr in themes
+    ]
     _save_cache(market, result)
     return result
 

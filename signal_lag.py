@@ -35,11 +35,12 @@ DATA_DIR = Path(os.environ.get("DATA_DIR", "data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 DB_PATH = DATA_DIR / "signal_log.db"
 
-# ルール定義: (短期, 長期)
-RULES = {
-    "SMA5/25":   (5, 25),    # 既存アプリの判定(早い・敏感)
-    "SMA50/200": (50, 200),  # 中長期(遅い・手堅い)
-}
+from signal_detect import (
+    RULE_SPECS, detect_golden_crosses, find_trough, parse_rule,
+)
+
+# ルール定義（signal_detect と共用）
+RULES = {k: (v["fast"], v["slow"]) for k, v in RULE_SPECS.items()}
 HORIZONS = (5, 20)           # 答え合わせの日数
 WIN_HORIZON = 20             # 勝率判定に使う日数
 
@@ -104,40 +105,6 @@ def make_mock_prices(seed: int = 1, days: int = 500) -> pd.DataFrame:
 # サイン検出と出遅れコスト計算
 # ============================================================
 
-def detect_golden_crosses(close: pd.Series, fast: int, slow: int) -> list[int]:
-    """ゴールデンクロスが発生した日のインデックス位置を返す"""
-    ma_f = close.rolling(fast).mean()
-    ma_s = close.rolling(slow).mean()
-    crosses = []
-    for i in range(slow, len(close)):
-        prev_f, prev_s = ma_f.iloc[i - 1], ma_s.iloc[i - 1]
-        cur_f, cur_s = ma_f.iloc[i], ma_s.iloc[i]
-        if pd.notna(prev_f) and pd.notna(prev_s) and prev_f <= prev_s and cur_f > cur_s:
-            crosses.append(i)
-    return crosses
-
-
-def find_trough(close: pd.Series, cross_idx: int, fast: int, slow: int,
-                max_lookback: int = 120) -> int:
-    """
-    出遅れコストの基準になる「直近安値」の位置を返す。
-    クロス発生日から遡って、短期MAが長期MAの下にいた期間(=下落局面)の
-    最安値を探す。下落局面が見つからない場合は直近20日の最安値。
-    """
-    ma_f = close.rolling(fast).mean()
-    ma_s = close.rolling(slow).mean()
-    start = cross_idx - 1
-    while (start > 0 and cross_idx - start < max_lookback
-           and pd.notna(ma_f.iloc[start]) and pd.notna(ma_s.iloc[start])
-           and ma_f.iloc[start] <= ma_s.iloc[start]):
-        start -= 1
-    lo, hi = max(0, start), cross_idx
-    if hi - lo < 3:   # 下落局面が短すぎる場合のフォールバック
-        lo = max(0, cross_idx - 20)
-    window = close.iloc[lo:hi + 1]
-    return lo + int(window.values.argmin())
-
-
 def analyze_stock(code: str, df: pd.DataFrame | None = None,
                   rule: str = "SMA5/25") -> list[SignalEvent]:
     """1銘柄×1ルールの全サインについて出遅れコストと先行リターンを計算"""
@@ -145,11 +112,11 @@ def analyze_stock(code: str, df: pd.DataFrame | None = None,
         df = fetch_prices(code)
     if df is None:
         return []
-    fast, slow = RULES[rule]
+    fast, slow, ma_type = parse_rule(rule)
     close = df["Close"]
     events = []
-    for ci in detect_golden_crosses(close, fast, slow):
-        ti = find_trough(close, ci, fast, slow)
+    for ci in detect_golden_crosses(close, fast, slow, ma_type):
+        ti = find_trough(close, ci, fast, slow, ma_type)
         sig_p, trough_p = float(close.iloc[ci]), float(close.iloc[ti])
         lag = (sig_p / trough_p - 1) * 100 if trough_p else 0.0
         fwd = {}
@@ -227,8 +194,8 @@ def record_live_signal(code: str, name: str = "", rule: str = "SMA5/25") -> dict
     df = fetch_prices(code, period="1y")
     if df is None:
         return None
-    fast, slow = RULES[rule]
-    crosses = detect_golden_crosses(df["Close"], fast, slow)
+    fast, slow, ma_type = parse_rule(rule)
+    crosses = detect_golden_crosses(df["Close"], fast, slow, ma_type)
     if not crosses or crosses[-1] != len(df) - 1:
         return None   # 直近の足でクロスしていない
     ev = analyze_stock(code, df, rule)[-1]

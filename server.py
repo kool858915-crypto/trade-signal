@@ -164,6 +164,25 @@ class AppHandler(BaseHTTPRequestHandler):
                 market, style, limit=limit, ticker=ticker,
                 signal=signal, days=days, include_wait=include_wait,
             ))
+        elif path == "/api/settings":
+            _json_response(self, tc.action_settings_get())
+        elif path == "/api/watchlist":
+            _json_response(self, tc.action_watchlist(market))
+        elif path == "/api/condition_stats":
+            try:
+                import trade_analytics as ta
+                _json_response(self, ta.analyze_condition_stats(market, style))
+            except Exception as e:
+                _json_response(self, {"error": str(e)}, 500)
+        elif path == "/api/backtest":
+            code = qs.get("code", "")
+            rule = qs.get("rule", "EMA9/21")
+            period = qs.get("period", "1mo")
+            try:
+                import backtest as bt
+                _json_response(self, bt.run_backtest(code, rule, period, market))
+            except Exception as e:
+                _json_response(self, {"error": str(e)}, 500)
         else:
             _json_response(self, {"error": "not found"}, 404)
 
@@ -201,7 +220,19 @@ class AppHandler(BaseHTTPRequestHandler):
         elif path == "/api/end":
             _json_response(self, tc.action_end(market, style))
         elif path == "/api/notify-test":
-            _json_response(self, tc.action_notify_test())
+            kind = data.get("kind", "test")
+            try:
+                import notifier as nf
+                ok = nf.notify_test(kind)
+                _json_response(self, {"ok": ok, "message": "送信しました" if ok else "失敗", "kind": kind})
+            except ImportError:
+                _json_response(self, tc.action_notify_test())
+        elif path == "/api/settings":
+            _json_response(self, tc.action_settings_update(data))
+        elif path == "/api/watchlist/add":
+            _json_response(self, tc.action_watchlist_add(
+                market, data.get("code", ""), data.get("name", ""),
+            ))
         elif path == "/api/buy":
             _json_response(self, tc.action_buy(
                 market, style,

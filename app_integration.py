@@ -38,10 +38,35 @@ def _load_recommendations(refresh: bool = False) -> dict:
     return _cache["data"]
 
 
+def _enrich_recommendations(data: dict, market: str = "jp") -> dict:
+    """出遅れコスト・簡易バックテストをおすすめカードに付与"""
+    try:
+        from backtest import avg_lag_pct, run_backtest
+        for r in data.get("recommendations", []):
+            code = r.get("code") or r.get("ticker")
+            if not code:
+                continue
+            lag = avg_lag_pct(code, "EMA9/21", market=market)
+            if lag is not None:
+                r["avg_lag_pct"] = lag
+                r["lag_warning"] = lag >= 5.0
+            bt = run_backtest(code, "EMA9/21", "1mo", market=market)
+            if bt.get("ok") and bt.get("count"):
+                r["backtest"] = {
+                    "wins": bt["wins"], "losses": bt["losses"],
+                    "win_rate": bt["win_rate"],
+                }
+    except Exception:
+        pass
+    return data
+
+
 def api_recommendations(refresh: bool = False, style: str = "day") -> dict:
     """http.server 向け: おすすめ銘柄 + デモスキャン用コード保存"""
     data = dict(_load_recommendations(refresh))
+    data = _enrich_recommendations(data, market="jp")
     codes = [r["code"] for r in data.get("recommendations", [])]
+    names = {r["code"]: r.get("name", r["code"]) for r in data.get("recommendations", [])}
     data["codes"] = codes
 
     try:
@@ -51,6 +76,7 @@ def api_recommendations(refresh: bool = False, style: str = "day") -> dict:
             f"recommended_jp_{style}_at",
             datetime.now().strftime("%Y-%m-%d %H:%M"),
         )
+        tc.sync_reco_watchlist("jp", codes, names)
     except ImportError:
         pass
 
@@ -77,7 +103,7 @@ def api_scan_signals(codes: list[str]) -> dict:
         code = str(code).strip()
         if not code:
             continue
-        for rule in ("SMA5/25", "SMA50/200"):
+        for rule in ("EMA9/21", "SMA5/25", "SMA50/200"):
             r = record_live_signal(code, rule=rule)
             if r:
                 hits.append(r)

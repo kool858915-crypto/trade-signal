@@ -167,10 +167,19 @@ def init_db():
                 price REAL, rsi REAL, score INTEGER,
                 conds_json TEXT
             );
+            CREATE TABLE IF NOT EXISTS watchlist (
+                code TEXT NOT NULL,
+                market TEXT NOT NULL,
+                name TEXT,
+                source TEXT DEFAULT 'manual',
+                added_at TEXT,
+                PRIMARY KEY (code, market)
+            );
         """)
         _migrate_columns(conn)
         conn.commit()
         conn.close()
+    _seed_watchlist_defaults()
 
 
 def _migrate_columns(conn):
@@ -682,13 +691,162 @@ def _ctx(market: str, style: str) -> Ctx:
     return Ctx(market, style)
 
 
+def reco_watchlist_sync_enabled() -> bool:
+    return _get_setting("reco_watchlist_sync", "1") == "1"
+
+
+def _seed_watchlist_defaults():
+    """初回のみデフォルト銘柄を watchlist に投入"""
+    if _get_setting("watchlist_seeded"):
+        return
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    with _db_lock:
+        conn = _conn()
+        for mkt, cfg in MARKETS.items():
+            for code in cfg["watchlist"]:
+                conn.execute(
+                    """INSERT OR IGNORE INTO watchlist
+                       (code, market, name, source, added_at)
+                       VALUES (?,?,?,?,?)""",
+                    (code, mkt, code, "manual", now),
+                )
+        conn.commit()
+        conn.close()
+    _set_setting("watchlist_seeded", "1")
+
+
+def sync_reco_watchlist(market: str, codes: list[str], names: dict | None = None):
+    """おすすめTop5を auto_reco で upsert、外れた auto_reco は削除"""
+    if not reco_watchlist_sync_enabled():
+        return
+    names = names or {}
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    codes = [str(c).upper() for c in codes if c]
+    with _db_lock:
+        conn = _conn()
+        for code in codes:
+            conn.execute(
+                """INSERT INTO watchlist (code, market, name, source, added_at)
+                   VALUES (?,?,?,?,?)
+                   ON CONFLICT(code, market) DO UPDATE SET
+                     name=excluded.name, source='auto_reco', added_at=excluded.added_at""",
+                (code, market, names.get(code, code), "auto_reco", now),
+            )
+        if codes:
+            placeholders = ",".join("?" * len(codes))
+            conn.execute(
+                f"""DELETE FROM watchlist
+                    WHERE market=? AND source='auto_reco'
+                    AND code NOT IN ({placeholders})""",
+                [market, *codes],
+            )
+        else:
+            conn.execute(
+                "DELETE FROM watchlist WHERE market=? AND source='auto_reco'",
+                (market,),
+            )
+        conn.commit()
+        conn.close()
+
+
+def get_watchlist_codes(market: str) -> list[str]:
+    with _db_lock:
+        conn = _conn()
+        rows = conn.execute(
+            "SELECT code FROM watchlist WHERE market=? ORDER BY source DESC, added_at DESC",
+            (market,),
+        ).fetchall()
+        conn.close()
+    codes = [r["code"] for r in rows]
+    return codes if codes else MARKETS[market]["watchlist"]
+
+
+def action_watchlist(market: str = "jp") -> dict:
+    with _db_lock:
+        conn = _conn()
+        rows = conn.execute(
+            "SELECT code, name, source, added_at FROM watchlist WHERE market=? ORDER BY added_at DESC",
+            (market,),
+        ).fetchall()
+        conn.close()
+    return {
+        "ok": True,
+        "market": market,
+        "items": [dict(r) for r in rows],
+    }
+
+
+def action_watchlist_add(market: str, code: str, name: str = "") -> dict:
+    code = code.strip().upper()
+    if not code:
+        return {"ok": False, "error": "銘柄コードが必要です"}
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    with _db_lock:
+        conn = _conn()
+        conn.execute(
+            """INSERT INTO watchlist (code, market, name, source, added_at)
+               VALUES (?,?,?,?,?)
+               ON CONFLICT(code, market) DO UPDATE SET
+                 name=excluded.name, source='manual', added_at=excluded.added_at""",
+            (code, market, name or code, "manual", now),
+        )
+        conn.commit()
+        conn.close()
+    return {"ok": True, "code": code, "market": market}
+
+
+APP_SETTING_KEYS = (
+    "notify_enabled", "demo_notify_enabled", "alerts_only",
+    "reco_watchlist_sync", "weekly_report_enabled",
+    "session_market", "session_style",
+)
+
+
+def action_settings_get() -> dict:
+    data = {k: _get_setting(k, "1" if k != "alerts_only" else "0")
+            for k in APP_SETTING_KEYS}
+    data["notify_enabled"] = _get_setting("notify_enabled", "1")
+    data["demo_mode"] = demo_mode_enabled()
+    data["market"] = _get_setting("session_market", "jp")
+    data["style"] = _get_setting("session_style", "day")
+    return {"ok": True, "settings": data}
+
+
+def action_settings_update(updates: dict) -> dict:
+    bool_keys = {
+        "notify_enabled": set_notification_enabled,
+        "demo_notify_enabled": lambda v: _set_setting("demo_notify_enabled", v),
+        "alerts_only": lambda v: _set_setting("alerts_only", v),
+        "reco_watchlist_sync": lambda v: _set_setting("reco_watchlist_sync", v),
+        "weekly_report_enabled": lambda v: _set_setting("weekly_report_enabled", v),
+    }
+    for key, fn in bool_keys.items():
+        if key in updates:
+            val = "1" if updates[key] in (True, "1", 1, "true") else "0"
+            if key == "notify_enabled":
+                fn(val == "1")
+            else:
+                fn(val)
+    if "market" in updates and updates["market"] in MARKETS:
+        _set_setting("session_market", updates["market"])
+    if "style" in updates and updates["style"] in STYLES:
+        _set_setting("session_style", updates["style"])
+    return action_settings_get()
+
+
 def get_scan_tickers(market: str, style: str) -> list:
-    """おすすめキャッシュがあればそれを、なければデフォルトwatchlist"""
+    """watchlist 全件をスキャン対象に（おすすめ連携ON時は auto_reco 含む）"""
+    codes = get_watchlist_codes(market)
+    if reco_watchlist_sync_enabled():
+        return codes
     try:
         import trade_recommend as tr
-        return tr.get_recommended_tickers(market, style)
+        cached = tr.get_recommended_tickers(market, style)
+        if cached and cached != MARKETS[market]["watchlist"]:
+            return cached
     except ImportError:
-        return MARKETS[market]["watchlist"]
+        pass
+    return codes
 
 
 def action_status(market: str = "jp", style: str = "day") -> dict:
@@ -717,6 +875,10 @@ def action_status(market: str = "jp", style: str = "day") -> dict:
         "demo_mode": demo_mode_enabled(),
         "demo_always_on": always_on_enabled() and demo_mode_enabled(),
         "always_on": always_on_enabled(),
+        "reco_watchlist_sync": reco_watchlist_sync_enabled(),
+        "demo_notify_enabled": _get_setting("demo_notify_enabled", "1") == "1",
+        "alerts_only": _get_setting("alerts_only", "0") == "1",
+        "weekly_report_enabled": _get_setting("weekly_report_enabled", "1") == "1",
     }
 
 
@@ -781,7 +943,7 @@ def action_scan(market: str = "jp", style: str = "day", tickers=None) -> dict:
 
 
 def _record_signal_lag_on_scan(results: list):
-    """買いシグナル検出時に出遅れコストをライブ記録"""
+    """買いシグナル検出時に出遅れコストをライブ記録（EMA9/21 優先）"""
     try:
         import signal_lag as sl
         for item in results:
@@ -789,7 +951,7 @@ def _record_signal_lag_on_scan(results: list):
                 continue
             ticker = str(item["ticker"]).upper()
             name = item.get("name", "")
-            sl.record_live_signal(ticker, name)
+            sl.record_live_signal(ticker, name, rule="EMA9/21")
     except Exception:
         pass
 
@@ -1497,6 +1659,12 @@ def action_monitor_all() -> dict:
             item = _check_position_row(row, ctx, notify=True)
             if item.get("stop_hit") and not before and not item.get("closed"):
                 alerts += 1
+
+    try:
+        import weekly_report as wr
+        wr.maybe_send_weekly_report(market, style)
+    except Exception:
+        pass
 
     return {
         "ok": True, "checked": len(rows), "alerts": alerts,

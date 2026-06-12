@@ -296,12 +296,25 @@ def _action_recommend_jp(style: str, limit: int) -> dict:
         }
         top.append(_enrich_recommendation(item, ctx))
 
+    try:
+        from app_integration import _enrich_recommendations
+        enriched = _enrich_recommendations(
+            {"recommendations": [{"code": c["ticker"], **c} for c in top]}, "jp",
+        )
+        for i, c in enumerate(top):
+            e = enriched["recommendations"][i]
+            c.update({k: e[k] for k in ("avg_lag_pct", "lag_warning", "backtest") if k in e})
+    except Exception:
+        pass
+
     tickers = [c["ticker"] for c in top]
     tc._set_setting(f"recommended_jp_{style}", json.dumps(tickers))
     tc._set_setting(
         f"recommended_jp_{style}_at",
         datetime.now().strftime("%Y-%m-%d %H:%M"),
     )
+    names = {c["code"]: c.get("name", c["code"]) for c in top}
+    tc.sync_reco_watchlist("jp", tickers, names)
 
     themes = result.get("themes", [])
     theme_labels = [t["theme"] for t in themes]
@@ -350,12 +363,25 @@ def action_recommend(market: str = "jp", style: str = "day", limit: int = 5) -> 
     ok_items = [c for c in candidates if "error" not in c]
     top = _pick_diverse_top(ok_items, limit)
 
+    try:
+        from app_integration import _enrich_recommendations
+        enriched = _enrich_recommendations(
+            {"recommendations": [{"code": c["ticker"], **c} for c in top]}, market,
+        )
+        for i, c in enumerate(top):
+            e = enriched["recommendations"][i]
+            c.update({k: e[k] for k in ("avg_lag_pct", "lag_warning", "backtest") if k in e})
+    except Exception:
+        pass
+
     tickers = [c["ticker"] for c in top]
     tc._set_setting(f"recommended_{market}_{style}", json.dumps(tickers))
     tc._set_setting(
         f"recommended_{market}_{style}_at",
         datetime.now().strftime("%Y-%m-%d %H:%M"),
     )
+    names = {c["ticker"]: c.get("name", c["ticker"]) for c in top}
+    tc.sync_reco_watchlist(market, tickers, names)
 
     news_count = sum(1 for c in top if c.get("news_themes"))
     theme_labels = [t.get("label", t.get("id", "")) for t in news_ctx.get("themes", [])[:5]]

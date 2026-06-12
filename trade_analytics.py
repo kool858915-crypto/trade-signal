@@ -11,6 +11,36 @@ import trade_core as tc
 MIN_TRADES_FOR_TUNE = 5
 
 
+def _ensure_score_history():
+    with tc._db_lock:
+        conn = tc._conn()
+        conn.execute("""CREATE TABLE IF NOT EXISTS score_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            market TEXT, style TEXT,
+            changed_at TEXT,
+            old_min_score INTEGER,
+            new_min_score INTEGER,
+            reason TEXT
+        )""")
+        conn.commit()
+        conn.close()
+
+
+def log_score_change(market: str, style: str, old_min: int, new_min: int, reason: str):
+    _ensure_score_history()
+    with tc._db_lock:
+        conn = tc._conn()
+        conn.execute(
+            """INSERT INTO score_history
+               (market, style, changed_at, old_min_score, new_min_score, reason)
+               VALUES (?,?,?,?,?,?)""",
+            (market, style, datetime.now().strftime("%Y-%m-%d %H:%M"),
+             old_min, new_min, reason),
+        )
+        conn.commit()
+        conn.close()
+
+
 def _tuning_key(market: str, style: str) -> str:
     return f"tuning_{market}_{style}"
 
@@ -221,7 +251,99 @@ def optimize_and_apply(market: str, style: str) -> dict:
 
     if changes:
         tuning["last_reason"] = "; ".join(changes)
+        if tuning.get("min_score") != old_min:
+            log_score_change(market, style, old_min, tuning.get("min_score", old_min),
+                             changes[0] if changes else "")
         save_tuning(market, style, tuning)
         return {"ok": True, "applied": True, "changes": changes, "tuning": tuning}
 
     return {"ok": True, "applied": False, "reason": "調整不要", "tuning": tuning}
+
+
+def analyze_condition_stats(market: str, style: str) -> dict:
+    """条件別勝率・RSI帯・スコア帯の集計（Phase 9）"""
+    rows = _fetch_trades_with_meta(market, style)
+    cross_stats = {"with_vol": {"w": 0, "l": 0}, "no_vol": {"w": 0, "l": 0}}
+    rsi_bands = {
+        "lt30": {"w": 0, "l": 0}, "30_50": {"w": 0, "l": 0},
+        "50_70": {"w": 0, "l": 0}, "gt70": {"w": 0, "l": 0},
+    }
+    score_bands = {"low": {"w": 0, "l": 0}, "mid": {"w": 0, "l": 0}, "high": {"w": 0, "l": 0}}
+
+    for r in rows:
+        win = float(r["pnl"]) > 0
+        bucket = "w" if win else "l"
+        conds_raw = r["entry_conds_json"]
+        has_cross = has_vol = False
+        if conds_raw:
+            try:
+                conds = json.loads(conds_raw)
+                for name, ok in conds.items():
+                    if not ok:
+                        continue
+                    if "クロス" in name:
+                        has_cross = True
+                    if "出来高" in name:
+                        has_vol = True
+            except json.JSONDecodeError:
+                pass
+        if has_cross:
+            key = "with_vol" if has_vol else "no_vol"
+            cross_stats[key][bucket] += 1
+
+    with tc._db_lock:
+        conn = tc._conn()
+        sig_rows = conn.execute(
+            """SELECT conditions_json, signal FROM signal_logs
+               WHERE market=? AND style=? AND signal IN ('買い','売り')""",
+            (market, style),
+        ).fetchall()
+        conn.close()
+
+    for sr in sig_rows:
+        try:
+            cj = json.loads(sr["conditions_json"] or "{}")
+        except json.JSONDecodeError:
+            continue
+        rsi = float(cj.get("rsi", 50))
+        score = int(cj.get("score", 0))
+        if rsi < 30:
+            band = "lt30"
+        elif rsi < 50:
+            band = "30_50"
+        elif rsi < 70:
+            band = "50_70"
+        else:
+            band = "gt70"
+        rsi_bands[band]["w"] += 1  # signal occurrence count
+
+    def _wr(d):
+        n = d["w"] + d["l"]
+        return {"trades": n, "win_rate": round(d["w"] / n * 100, 1) if n else None,
+                "wins": d["w"], "losses": d["l"]}
+
+    _ensure_score_history()
+    with tc._db_lock:
+        conn = tc._conn()
+        history = [dict(row) for row in conn.execute(
+            """SELECT changed_at, old_min_score, new_min_score, reason
+               FROM score_history WHERE market=? AND style=?
+               ORDER BY id DESC LIMIT 10""",
+            (market, style),
+        ).fetchall()]
+        conn.close()
+
+    tuning = load_tuning(market, style)
+    return {
+        "ok": True,
+        "market": market,
+        "style": style,
+        "cross_volume": {
+            "with_vol": _wr(cross_stats["with_vol"]),
+            "no_vol": _wr(cross_stats["no_vol"]),
+        },
+        "rsi_bands": {k: {"signals": v["w"]} for k, v in rsi_bands.items()},
+        "current_min_score": tuning.get("min_score", tc.COMMON["min_score"]),
+        "score_history": history,
+        "trade_count": len(rows),
+    }

@@ -1,94 +1,93 @@
 # IMPLEMENTATION_PLAN.md — デモ取引アプリ 機能拡張 実装計画書
 
-> このファイルはClaude Code用の作業指示書。リポジトリ直下に置き、
-> 「IMPLEMENTATION_PLAN.md の Phase 1 を実装して」のように指示して使う。
-> 各タスクは必ず【前提調査】→【実装】→【受け入れ条件の確認】の順で進めること。
+> 各 Phase は【前提調査】→【実装】→【受け入れ条件の確認】の順で進める。
+
+## 全体ルール
+
+1. 既存デモ取引ループを壊さない
+2. DBスキーマ変更は追加のみ
+3. 構文チェック・手動テスト後に次 Phase へ
+4. ntfy は `notifier.py` 規約に従う
+5. ポーリング増加は `market_hours.py` 内側
+6. UIは既存PWAデザインを踏襲
 
 ---
 
-## 全体ルール(全Phaseに適用)
+## Phase 1: シグナル履歴タブ ✅
 
-1. **既存のデモ取引ループを壊さない。** 変更前に必ず該当モジュールを読み、
-   既存のテーブル・関数のシグネチャを確認してから差分で実装する。
-2. **DBスキーマ変更は追加のみ**(ALTER TABLE ADD COLUMN / CREATE TABLE IF NOT EXISTS)。
-   既存カラムの削除・リネームは禁止。マイグレーションは起動時に自動実行される形にする。
-3. 各Phase完了時に `python -m pytest`(無ければ手動テストコマンド)と
-   構文チェックを通し、**動作確認してから次のPhaseに進む**。
-4. ntfy通知のタグ・優先度は Phase 4 で定義する規約に全体で従う。
-5. Render無料枠を意識し、ポーリング間隔・外部API呼び出し回数を増やす変更は
-   必ず市場時間制御(Phase 2)の内側に置く。
-6. UIはPWAの既存デザイン(色・部品)を踏襲。新規タブは既存タブの実装をコピーして改修。
+- `conditions_json` / `demo_position_id`
+- `GET /api/signal_history`
+- PWA「履歴」タブ
+
+## Phase 2: 市場時間の自動制御 ✅
+
+- `market_hours.py`
+- 閉場中スキャン抑制・15分スリープ
+- 寄付/大引け前 priority 向上
+
+## Phase 3: デモ vs 手動の成績分離 ✅
+
+- `GET /api/performance?mode=demo|manual|all`
+- 成績タブ 比較|デモ|手動
+- シグナル追随率
+
+## Phase 4: 通知の種類分け ✅
+
+- `notifier.py`（[本番]/[デモ]/[注意]/[週報]）
+- `demo_notify_enabled` / `alerts_only`
+
+## Phase 5: 出遅れコストと実シグナル統一 ✅
+
+- `signal_detect.py` 共通検出
+- `EMA9/21` を signal_lag に追加
+- おすすめカードに `avg_lag_pct`
+
+## Phase 6: ニュース画面の強化 ✅
+
+- PWA「ニュース」タブ
+- テーマ→波及チェーン図（CSS）
+- ホームテーマチップ→ニュース遷移
+
+## Phase 7: おすすめ→ウォッチリスト自動連携 ✅
+
+- `watchlist` テーブル
+- `sync_reco_watchlist()` on おすすめ更新
+- 手動銘柄は削除しない
+
+## Phase 8: 設定画面 ✅
+
+- `GET/POST /api/settings`
+- PWA「設定」タブ（通知・連携・週報）
+- ウォッチリスト手動追加
+
+## Phase 9: 条件別勝率ダッシュボード ✅
+
+- `GET /api/condition_stats`
+- 成績タブ内「条件別分析」
+- `score_history` テーブル
+
+## Phase 10: 週次レポート通知 ✅
+
+- `weekly_report.py`
+- 日曜18:00 JST（監視ループ内）
+- 設定でON/OFF
+
+## Phase 11: バックテスト簡易版 ✅
+
+- `backtest.py`
+- `GET /api/backtest?code=&rule=EMA9/21&period=1mo`
+- おすすめカードに直近成績表示
+
+## Phase 12: 米国株への波及銘柄拡張 ✅
+
+- `THEME_MAP_US` in `trade_news.py`
+- `/api/news` US対応
+- 英語RSS + yfinance US
 
 ---
 
-## Phase 1: シグナル履歴タブ 【最優先】 ✅ 実装済み
-
-### 前提調査
-- `signal_logs` テーブルのスキーマを確認(カラム名・型・既存データ)
-- シグナル生成箇所を grep(`signal_logs` への INSERT を全て列挙)
-- 条件内訳(RSI・出来高・クロス種別など)が現状どこまで保存されているか確認
-
-### 実装
-1. `conditions_json TEXT` / `demo_position_id INTEGER` カラムを追加
-2. API: `GET /api/signal_history?limit=50&market=jp`
-3. PWAに「履歴」タブを追加
-
-### 受け入れ条件
-- [x] 過去のシグナルが新しい順に表示される
-- [x] 各シグナルの「なぜ通知が来たか」(RSI値・出来高倍率など)が見える
-- [x] デモエントリーに繋がったシグナルが区別できる
-
----
-
-## Phase 2: 市場時間の自動制御 ✅ 実装済み
-
-### 実装
-1. `market_hours.py`（東証/NYSE、祝日、phase 判定）
-2. `action_monitor_all` / 監視ループで閉場中スキップ・15分スリープ
-3. 寄付直後・大引け前のシグナル通知 priority 4
-
-### 受け入れ条件
-- [x] 土日・祝日・昼休みに自動スキャンが走らない
-- [x] 開場中は通常間隔で再開
-- [x] 閉場中は monitor_sleep_sec=900
-
----
-
-## Phase 3: デモ vs 手動の成績分離 ✅ 実装済み
-
-### 実装
-1. `GET /api/performance?mode=demo|manual|all`
-2. 成績タブ「比較 | デモ | 手動」切替
-3. シグナル追随率（followed_signal ベース）
-
-### 受け入れ条件
-- [x] デモと手動の勝率・損益・PFが別表示
-- [x] 比較ビューで横並び表示
-
----
-
-## Phase 4: 通知の種類分け ✅ 実装済み
-
-### 実装
-1. `notifier.py` に種別・tags・priority 定義
-2. 全送信箇所を kind 指定に置換
-3. `demo_notify_enabled` / `alerts_only` 設定キー（Phase 8 で UI 化）
-
-### 受け入れ条件
-- [x] [本番]/[デモ]/[注意] プレフィックスで区別
-- [x] デモ通知OFF・注意のみモードの分岐あり
-
----
-
-## Phase 5〜12
-
-（未実装。Phase 8 設定タブで demo_notify / alerts_only を UI 化予定）
-
-## 実装順序
+## 実装順序（完了）
 
 ```
-Phase 1(履歴) → Phase 3(成績分離) → Phase 2(市場時間)
-  → Phase 4(通知規約) → Phase 8(設定)
-  → Phase 5(lag統一) → Phase 7(ウォッチ連携) → Phase 6(ニュース画面)
-  → Phase 9(条件別勝率) → Phase 10(週報) → Phase 11(バックテスト) → Phase 12(US)
+Phase 1 → 3 → 2 → 4 → 8 → 5 → 7 → 6 → 9 → 10 → 11 → 12  ✅ 全完了
 ```
