@@ -123,10 +123,10 @@ class AppHandler(BaseHTTPRequestHandler):
             _json_response(self, tc.action_validate(market, style))
         elif path == "/api/journal":
             _json_response(self, tc.action_journal(market, style))
-        elif path == "/api/signal-lag":
+        elif path in ("/api/signal-lag", "/api/lag_report"):
             try:
-                import signal_lag as sl
-                _json_response(self, sl.get_lag_report())
+                import app_integration as ai
+                _json_response(self, ai.api_lag_report())
             except Exception as e:
                 _json_response(self, {"error": str(e)}, 500)
         elif path == "/api/recommendations":
@@ -173,7 +173,14 @@ class AppHandler(BaseHTTPRequestHandler):
             _json_response(self, {"error": "invalid market/style"}, 400)
             return
 
-        if path == "/api/start":
+        if path == "/api/scan_signals":
+            try:
+                import app_integration as ai
+                codes = data if isinstance(data, list) else data.get("codes", [])
+                _json_response(self, ai.api_scan_signals(codes))
+            except Exception as e:
+                _json_response(self, {"error": str(e)}, 500)
+        elif path == "/api/start":
             codes = data.get("codes") or data.get("tickers")
             tickers = codes if isinstance(codes, list) else None
             _json_response(self, tc.action_start(market, style, tickers=tickers))

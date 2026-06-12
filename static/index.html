@@ -144,8 +144,8 @@ nav button span{display:block;font-size:18px;margin-bottom:2px}
     <div id="validate-content"></div>
     <div id="journal-content"></div>
     <div class="card" style="margin-top:12px">
-      <h2>出遅れコスト</h2>
-      <p class="hint">サイン発生時に既に何%上がっていたかを記録。SMA5/25とSMA50/200の比較に使います。</p>
+      <h2>サイン成績（出遅れコスト×勝率）</h2>
+      <p class="hint">出遅れコスト = 直近安値からサイン日まで既に上がっていた率。早いルール vs 遅いルールの交換条件を実測します。</p>
       <button class="btn btn-secondary" onclick="loadSignalLag()">更新</button>
     </div>
     <div id="signal-lag-content"></div>
@@ -242,11 +242,20 @@ async function loadRecommend(force=false){
 }
 
 async function startTrading(){
+  if(currentCodes.length){
+    const h={'X-Pin':pin,'Content-Type':'application/json'};
+    const scanRes=await fetch('/api/scan_signals?'+ctxQs(),{method:'POST',headers:h,body:JSON.stringify(currentCodes)});
+    if(scanRes.status===401){localStorage.removeItem(PIN_KEY);location.reload();return;}
+    const scan=await scanRes.json();
+    if(scan.message)toast(scan.message);
+  }
   const body=currentCodes.length?{codes:currentCodes}:undefined;
   const d=await apiPost('/api/start',body);
-  if(d&&d.ok&&d.scan_tickers){
-    toast('スキャン開始: '+d.scan_tickers.join(', '));
+  if(d&&d.ok){
+    if(d.scan_tickers)toast('デモ開始: '+d.scan_tickers.join(', '));
+    else if(d.message)toast(d.message);
   }
+  loadSignalLag();
 }
 
 async function runScan(){
@@ -353,19 +362,22 @@ async function loadValidate(){
 async function loadSignalLag(){
   const el=document.getElementById('signal-lag-content');
   if(!el)return;
-  const d=await api('/api/signal-lag');if(!d)return;
+  const d=await api('/api/lag_report');if(!d)return;
   if(d.error){el.innerHTML=`<div class="empty">${d.error}</div>`;return;}
+  const fmt=(v,suffix='%',sign=false)=>v==null?'–':`<span class="${sign?(v>=0?'pnl-pos':'pnl-neg'):''}">${sign&&v>=0?'+':''}${v}${suffix}</span>`;
   let h='';
   if(d.rules&&d.rules.length){
-    h+='<div class="card"><h2>ルール別集計</h2>';
+    h+='<div class="card"><table style="width:100%;font-size:13px;border-collapse:collapse">';
+    h+='<tr style="border-bottom:1px solid var(--border)"><th style="text-align:left;padding:6px">ルール</th><th>確定</th><th>出遅れ</th><th>勝率</th><th>20日</th></tr>';
     d.rules.forEach(r=>{
-      const lag=r.avg_lag!=null?r.avg_lag+'%':'-';
-      const win=r.win_rate!=null?r.win_rate+'%':'-';
-      const fwd=r.avg_fwd20!=null?(r.avg_fwd20>=0?'+':'')+r.avg_fwd20+'%':'-';
-      h+=`<div class="stat"><span>${r.rule}</span><span>出遅れ${lag} / 勝率${win} / 20日${fwd}</span></div>`;
-      h+=`<div class="cond">確定${r.settled}件 / 待ち${r.pending}件</div>`;
+      const pend=r.pending?` (+${r.pending}待ち)`:'';
+      h+=`<tr style="border-bottom:1px solid var(--border)"><td style="padding:6px">${r.rule}</td>`;
+      h+=`<td style="text-align:right;padding:6px">${r.settled}件${pend}</td>`;
+      h+=`<td style="text-align:right;padding:6px">${fmt(r.avg_lag)}</td>`;
+      h+=`<td style="text-align:right;padding:6px">${fmt(r.win_rate)}</td>`;
+      h+=`<td style="text-align:right;padding:6px">${fmt(r.avg_fwd20,'%',true)}</td></tr>`;
     });
-    h+='</div>';
+    h+='</table></div>';
   }
   if(d.recent&&d.recent.length){
     h+='<div class="card"><h2>直近サイン</h2>';
