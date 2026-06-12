@@ -1,0 +1,2 @@
+ticker,side,entry_time,entry_price,qty,stop_loss,take_profit,exit_time,exit_price,pnl,result
+7203,買い,2026-06-12 10:17,2770.0,100,2758.3,2793.4,2026-06-12 10:17,2800.0,3000,win

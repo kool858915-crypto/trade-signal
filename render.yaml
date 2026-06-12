@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: trade-signal
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python server.py
+    healthCheckPath: /api/health
+    envVars:
+      - key: WEB_PIN
+        sync: false
+      - key: NTFY_TOPIC
+        value: my-trade-alerts-x7k2
+      - key: DATA_DIR
+        value: /tmp/data
+      - key: MONITOR_INTERVAL
+        value: "300"

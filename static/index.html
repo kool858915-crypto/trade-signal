@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="トレード">
+<meta name="theme-color" content="#0f172a">
+<link rel="manifest" href="/manifest.json">
+<title>トレードシグナル</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+:root{--bg:#0f172a;--card:#1e293b;--accent:#22c55e;--danger:#ef4444;--text:#f1f5f9;--muted:#94a3b8;--border:#334155}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:var(--bg);color:var(--text);min-height:100dvh;padding-bottom:80px}
+header{position:sticky;top:0;z-index:10;background:var(--bg);border-bottom:1px solid var(--border);padding:10px 16px}
+header h1{font-size:16px;font-weight:700;margin-bottom:8px}
+.top-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+select{padding:8px 10px;border:1px solid var(--border);border-radius:8px;background:#0b1220;color:var(--text);font-size:14px}
+.badge{font-size:11px;padding:3px 8px;border-radius:999px;font-weight:600;margin-left:auto}
+.badge.on{background:#14532d;color:#86efac}
+.badge.off{background:#3f1d1d;color:#fca5a5}
+main{padding:16px;max-width:480px;margin:0 auto}
+.panel{display:none}.panel.active{display:block}
+.card{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:16px;margin-bottom:12px}
+.card h2{font-size:14px;margin-bottom:10px;color:var(--muted)}
+.btn{display:block;width:100%;padding:16px;border:none;border-radius:12px;font-size:16px;font-weight:700;cursor:pointer;margin-bottom:10px}
+.btn:active{transform:scale(.98)}
+.btn-start{background:var(--accent);color:#052e16}
+.btn-end{background:var(--danger);color:#fff}
+.btn-primary{background:#3b82f6;color:#fff}
+.btn-secondary{background:var(--border);color:var(--text)}
+label{display:block;font-size:13px;color:var(--muted);margin:10px 0 6px}
+input{width:100%;padding:14px;border:1px solid var(--border);border-radius:10px;background:#0b1220;color:var(--text);font-size:16px}
+.signal-buy{color:#86efac;font-weight:700}.signal-sell{color:#fca5a5;font-weight:700}.signal-wait{color:var(--muted)}
+.cond{font-size:13px;color:var(--muted);margin:2px 0}
+.pnl-pos{color:#86efac}.pnl-neg{color:#fca5a5}
+.alert{background:#451a03;border:1px solid #92400e;color:#fcd34d;padding:10px;border-radius:10px;margin-top:8px;font-size:13px}
+.stat{display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border);font-size:14px}
+.stat:last-child{border:none}
+nav{position:fixed;bottom:0;left:0;right:0;background:var(--card);border-top:1px solid var(--border);display:flex;padding:6px 2px calc(6px + env(safe-area-inset-bottom))}
+nav button{flex:1;background:none;border:none;color:var(--muted);font-size:10px;padding:8px 2px;cursor:pointer}
+nav button.active{color:var(--accent)}
+nav button span{display:block;font-size:18px;margin-bottom:2px}
+#login-screen{position:fixed;inset:0;background:var(--bg);z-index:100;display:flex;align-items:center;justify-content:center;padding:24px}
+#login-screen.hidden{display:none}
+.toast{position:fixed;top:70px;left:50%;transform:translateX(-50%);background:#334155;color:#fff;padding:12px 20px;border-radius:10px;font-size:14px;z-index:50;opacity:0;transition:opacity .3s;pointer-events:none;max-width:90%;text-align:center}
+.toast.show{opacity:1}
+.loading,.empty{text-align:center;color:var(--muted);padding:24px}
+.hint{font-size:12px;color:var(--muted);line-height:1.5;margin-top:8px}
+.sell-row{display:flex;gap:8px;margin-top:10px}
+.sell-row input{flex:1}
+.sell-row .btn{width:auto;padding:12px 14px;margin:0;white-space:nowrap}
+</style>
+</head>
+<body>
+<div id="login-screen">
+  <div style="width:100%;max-width:320px">
+    <h1 style="text-align:center;margin-bottom:16px">トレードシグナル</h1>
+    <label>PINコード</label>
+    <input id="pin-input" type="password" inputmode="numeric" placeholder="PIN">
+    <button class="btn btn-primary" style="margin-top:16px" onclick="login()">ログイン</button>
+    <p class="hint" style="margin-top:16px">デプロイ時に設定した WEB_PIN を入力してください。</p>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+<header>
+  <h1>トレードシグナル</h1>
+  <div class="top-row">
+    <select id="sel-market" onchange="onContextChange()">
+      <option value="jp">日本株</option>
+      <option value="us">米国株</option>
+    </select>
+    <select id="sel-style" onchange="onContextChange()">
+      <option value="day">デイトレ</option>
+      <option value="swing">スイング</option>
+      <option value="long">中長期</option>
+    </select>
+    <span class="badge off" id="status-badge">通知OFF</span>
+  </div>
+</header>
+<main>
+  <section class="panel active" id="panel-home">
+    <div class="card">
+      <h2>取引セッション</h2>
+      <p class="hint">開始で通知ON、終了で通知OFF。建玉の損切りは自動監視します。</p>
+      <button class="btn btn-start" onclick="apiPost('/api/start')">取引を開始します</button>
+      <button class="btn btn-end" onclick="apiPost('/api/end')">終わります</button>
+    </div>
+    <div class="card">
+      <h2>クイック</h2>
+      <button class="btn btn-primary" onclick="goScan()">シグナルをスキャン</button>
+      <button class="btn btn-secondary" onclick="goPositions()">建玉を確認</button>
+    </div>
+  </section>
+  <section class="panel" id="panel-scan">
+    <button class="btn btn-primary" onclick="runScan()">スキャン実行</button>
+    <div id="scan-results"><div class="empty">スキャンを実行してください</div></div>
+  </section>
+  <section class="panel" id="panel-positions">
+    <button class="btn btn-secondary" onclick="loadPositions()">更新</button>
+    <div id="positions-list"><div class="empty">建玉がありません</div></div>
+  </section>
+  <section class="panel" id="panel-entry">
+    <div class="card">
+      <h2>エントリー記録</h2>
+      <label>銘柄</label>
+      <input id="buy-ticker" list="watchlist" placeholder="7203 / AAPL">
+      <datalist id="watchlist"></datalist>
+      <label>価格</label>
+      <input id="buy-price" type="number" step="any" inputmode="decimal">
+      <label>数量</label>
+      <input id="buy-qty" type="number" step="1" inputmode="numeric">
+      <label>売買</label>
+      <select id="buy-side" style="width:100%;padding:14px;border:1px solid var(--border);border-radius:10px;background:#0b1220;color:var(--text)">
+        <option value="buy">買い</option>
+        <option value="short">売り</option>
+      </select>
+      <button class="btn btn-primary" style="margin-top:16px" onclick="submitBuy()">記録する</button>
+    </div>
+  </section>
+  <section class="panel" id="panel-review">
+    <button class="btn btn-secondary" onclick="loadReview()">更新</button>
+    <div id="review-content"><div class="empty">成績データがありません</div></div>
+  </section>
+</main>
+<nav>
+  <button class="active" data-panel="home" onclick="showPanel('home')"><span>🏠</span>ホーム</button>
+  <button data-panel="scan" onclick="showPanel('scan')"><span>📊</span>スキャン</button>
+  <button data-panel="positions" onclick="showPanel('positions')"><span>📋</span>建玉</button>
+  <button data-panel="entry" onclick="showPanel('entry')"><span>✏️</span>記録</button>
+  <button data-panel="review" onclick="showPanel('review')"><span>📈</span>成績</button>
+</nav>
+<script>
+const PIN_KEY='trade_pin';
+const CTX_KEY='trade_ctx';
+let pin=localStorage.getItem(PIN_KEY)||'';
+let market='jp', style='day';
+const saved=JSON.parse(localStorage.getItem(CTX_KEY)||'{}');
+if(saved.market) market=saved.market;
+if(saved.style) style=saved.style;
+document.getElementById('sel-market').value=market;
+document.getElementById('sel-style').value=style;
+
+function ctxQs(){return `market=${market}&style=${style}`;}
+function toast(m){const e=document.getElementById('toast');e.textContent=m;e.classList.add('show');setTimeout(()=>e.classList.remove('show'),2500);}
+function login(){pin=document.getElementById('pin-input').value;if(!pin)return;localStorage.setItem(PIN_KEY,pin);document.getElementById('login-screen').classList.add('hidden');refreshStatus();}
+function onContextChange(){market=document.getElementById('sel-market').value;style=document.getElementById('sel-style').value;localStorage.setItem(CTX_KEY,JSON.stringify({market,style}));refreshStatus();}
+async function api(path,opts={}){const sep=path.includes('?')?'&':'?';const url=path.startsWith('/api/')?path+sep+ctxQs():path;const h={'X-Pin':pin,...opts.headers||{}};if(opts.body)h['Content-Type']='application/json';const r=await fetch(url,{...opts,headers:h});if(r.status===401){localStorage.removeItem(PIN_KEY);location.reload();return null;}return r.json();}
+async function apiPost(path,body){const d=await api(path,{method:'POST',body:body?JSON.stringify(body):undefined});if(!d)return;if(d.message)toast(d.message);if(d.error)toast(d.error);refreshStatus();return d;}
+function showPanel(n){document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));document.getElementById('panel-'+n).classList.add('active');document.querySelectorAll('nav button').forEach(b=>b.classList.toggle('active',b.dataset.panel===n));if(n==='review')loadReview();}
+function goScan(){showPanel('scan');runScan();}
+function goPositions(){showPanel('positions');loadPositions();}
+function sigCls(s){return s==='買い'?'signal-buy':s==='売り'?'signal-sell':'signal-wait';}
+function fmtPnl(v,c){if(c==='円')return (v>=0?'+':'')+Math.round(v).toLocaleString()+'円';return (v>=0?'+':'')+v.toFixed(2)+'$';}
+function fmtPrice(v,c){if(c==='円')return v.toLocaleString()+'円';return '$'+v.toFixed(2);}
+
+async function refreshStatus(){
+  const d=await api('/api/status');if(!d)return;
+  const b=document.getElementById('status-badge');
+  b.textContent=d.notify_enabled?'通知ON':'通知OFF';
+  b.className='badge '+(d.notify_enabled?'on':'off');
+  document.getElementById('watchlist').innerHTML=(d.watchlist||[]).map(t=>`<option value="${t}"></option>`).join('');
+}
+
+async function runScan(){
+  const el=document.getElementById('scan-results');
+  el.innerHTML='<div class="loading">スキャン中...</div>';
+  const d=await api('/api/scan');if(!d)return;
+  if(!d.results.length){el.innerHTML='<div class="empty">結果なし</div>';return;}
+  el.innerHTML=d.results.map(r=>{
+    if(r.error)return `<div class="card"><b>${r.ticker}</b><br><span class="signal-wait">${r.error}</span></div>`;
+    let h=`<div class="card"><div style="display:flex;justify-content:space-between"><b>${r.ticker}</b><span class="${sigCls(r.signal)}">${r.signal}</span></div>
+      <div style="margin:8px 0">現値 <b>${r.price.toLocaleString()}</b> (${r.time})</div>
+      <div class="cond">RSI ${r.rsi.toFixed(1)} / ATR ${r.atr.toFixed(2)}</div>`;
+    r.conds.forEach(c=>{h+=`<div class="cond">${c.ok?'○':'×'} ${c.name}</div>`;});
+    if(r.plan){h+=`<div class="cond" style="margin-top:6px">損切り ${r.plan.stop.toLocaleString()} / 利確 ${r.plan.target.toLocaleString()}</div>`;
+      if(r.plan.qty>0)h+=`<div class="cond">推奨 ${r.plan.qty}</div>`;}
+    if(r.signal==='買い'||r.signal==='売り'){
+      const side=r.signal==='売り'?'short':'buy';
+      const q=(r.plan&&r.plan.qty)?r.plan.qty:(market==='jp'?100:1);
+      h+=`<button class="btn btn-secondary" style="margin-top:8px" onclick="prefill('${r.ticker}',${r.price},${q},'${side}')">記録する</button>`;}
+    return h+'</div>';
+  }).join('');
+}
+function prefill(t,p,q,s){showPanel('entry');document.getElementById('buy-ticker').value=t;document.getElementById('buy-price').value=p;document.getElementById('buy-qty').value=q;document.getElementById('buy-side').value=s;}
+async function submitBuy(){
+  const t=document.getElementById('buy-ticker').value.trim();
+  const p=parseFloat(document.getElementById('buy-price').value);
+  const q=parseInt(document.getElementById('buy-qty').value,10);
+  const short=document.getElementById('buy-side').value==='short';
+  if(!t||!p||!q){toast('入力を確認してください');return;}
+  const d=await apiPost('/api/buy',{ticker:t,price:p,qty:q,short});
+  if(d&&d.ok)toast(`${t} 記録完了`);
+}
+async function loadPositions(){
+  const el=document.getElementById('positions-list');
+  el.innerHTML='<div class="loading">読み込み中...</div>';
+  const d=await api('/api/positions');if(!d)return;
+  if(!d.positions.length){el.innerHTML='<div class="empty">建玉がありません</div>';return;}
+  const cur=d.currency||'円';
+  el.innerHTML=d.positions.map(p=>{
+    let h=`<div class="card"><div style="display:flex;justify-content:space-between"><b>${p.ticker}</b><span class="${p.side==='買い'?'pnl-pos':'pnl-neg'}">${p.side} ${p.qty}</span></div>
+      <div class="cond">@ ${p.entry_price.toLocaleString()} (${p.entry_time})</div>`;
+    if(p.current_price!==undefined){
+      const cls=p.pnl>=0?'pnl-pos':'pnl-neg';
+      h+=`<div class="cond">現値 ${p.current_price.toLocaleString()} / <span class="${cls}">${fmtPnl(p.pnl,cur)}</span></div>`;}
+    if(p.stop_loss)h+=`<div class="cond">損切り ${p.stop_loss.toLocaleString()} / 利確 ${(p.take_profit||0).toLocaleString()}</div>`;
+    if(p.stop_hit)h+='<div class="alert">損切りライン到達!</div>';
+    h+=`<div class="sell-row"><input id="sp-${p.ticker}" type="number" step="any" placeholder="決済価格"><button class="btn btn-end" onclick="submitSell('${p.ticker}')">決済</button></div></div>`;
+    return h;
+  }).join('');
+}
+async function submitSell(t){
+  const p=parseFloat(document.getElementById('sp-'+t).value);
+  if(!p){toast('決済価格を入力');return;}
+  const d=await apiPost('/api/sell',{ticker:t,price:p});
+  if(d&&d.ok){toast(`${t} 決済 ${fmtPnl(d.pnl,d.currency||'円')}`);loadPositions();}
+}
+async function loadReview(){
+  const el=document.getElementById('review-content');
+  el.innerHTML='<div class="loading">読み込み中...</div>';
+  const d=await api('/api/review');if(!d)return;
+  if(!d.count){el.innerHTML='<div class="empty">決済済みトレードなし</div>';return;}
+  const c=d.currency||'円';
+  let h=`<div class="card">
+    <div class="stat"><span>合計損益</span><b class="${d.total_pnl>=0?'pnl-pos':'pnl-neg'}">${fmtPnl(d.total_pnl,c)}</b></div>
+    <div class="stat"><span>勝率</span><span>${d.win_rate.toFixed(1)}% (${d.wins}勝${d.losses}敗)</span></div>
+    <div class="stat"><span>期待値</span><span>${fmtPnl(d.expectancy,c)}</span></div></div>`;
+  if(d.by_ticker.length){h+='<div class="card"><h2>銘柄別</h2>';
+    d.by_ticker.forEach(t=>{h+=`<div class="stat"><span>${t.ticker}(${t.trades})</span><span class="${t.pnl>=0?'pnl-pos':'pnl-neg'}">${fmtPnl(t.pnl,c)}</span></div>`;});
+    h+='</div>';}
+  el.innerHTML=h;
+}
+if(pin){document.getElementById('login-screen').classList.add('hidden');refreshStatus();}
+</script>
+</body>
+</html>
