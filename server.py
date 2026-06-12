@@ -123,6 +123,27 @@ class AppHandler(BaseHTTPRequestHandler):
             _json_response(self, tc.action_validate(market, style))
         elif path == "/api/journal":
             _json_response(self, tc.action_journal(market, style))
+        elif path == "/api/recommendations":
+            try:
+                import app_integration as ai
+                refresh = qs.get("refresh") in ("true", "1")
+                _json_response(self, ai.api_recommendations(refresh=refresh, style=style))
+            except Exception as e:
+                _json_response(self, {"error": str(e)}, 500)
+        elif path == "/api/recommend":
+            try:
+                import trade_recommend as tr
+                limit = int(qs.get("limit", "5"))
+                _json_response(self, tr.action_recommend(market, style, limit=limit))
+            except Exception as e:
+                _json_response(self, {"error": str(e)}, 500)
+        elif path == "/api/news":
+            try:
+                import trade_news as tnews
+                refresh = qs.get("refresh") == "1"
+                _json_response(self, tnews.get_news_context(market, force_refresh=refresh))
+            except Exception as e:
+                _json_response(self, {"error": str(e)}, 500)
         else:
             _json_response(self, {"error": "not found"}, 404)
 
@@ -147,7 +168,9 @@ class AppHandler(BaseHTTPRequestHandler):
             return
 
         if path == "/api/start":
-            _json_response(self, tc.action_start(market, style))
+            codes = data.get("codes") or data.get("tickers")
+            tickers = codes if isinstance(codes, list) else None
+            _json_response(self, tc.action_start(market, style, tickers=tickers))
         elif path == "/api/end":
             _json_response(self, tc.action_end(market, style))
         elif path == "/api/notify-test":

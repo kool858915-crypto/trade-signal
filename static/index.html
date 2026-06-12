@@ -47,6 +47,11 @@ nav button span{display:block;font-size:18px;margin-bottom:2px}
 .toast.show{opacity:1}
 .loading,.empty{text-align:center;color:var(--muted);padding:24px}
 .hint{font-size:12px;color:var(--muted);line-height:1.5;margin-top:8px}
+.reason{font-size:12px;color:#cbd5e1;line-height:1.5;margin:4px 0 4px 12px;list-style:disc}
+.rank-badge{font-size:11px;background:#1e3a5f;color:#93c5fd;padding:2px 8px;border-radius:999px}
+.news-badge{font-size:11px;background:#422006;color:#fcd34d;padding:2px 8px;border-radius:999px;margin-left:4px}
+.theme-chip{display:inline-block;font-size:11px;background:#1e293b;border:1px solid var(--border);color:#cbd5e1;padding:4px 8px;border-radius:999px;margin:3px 4px 3px 0}
+.news-box{background:#0b1220;border:1px solid var(--border);border-radius:10px;padding:10px;margin-bottom:10px}
 .sell-row{display:flex;gap:8px;margin-top:10px}
 .sell-row input{flex:1}
 .sell-row .btn{width:auto;padding:12px 14px;margin:0;white-space:nowrap}
@@ -83,16 +88,23 @@ nav button span{display:block;font-size:18px;margin-bottom:2px}
     <div class="card">
       <h2>取引セッション</h2>
       <p class="hint">開始でデモ売買を自動記録。シグナル検出→仮想エントリー→損切り/利確で自動決済。実売買不要。</p>
-      <button class="btn btn-start" onclick="apiPost('/api/start')">取引を開始します（デモ）</button>
+      <button class="btn btn-start" onclick="startTrading()">取引を開始します（デモ）</button>
       <button class="btn btn-end" onclick="apiPost('/api/end')">終わります</button>
     </div>
     <div class="card">
+      <h2>今日のおすすめ銘柄</h2>
+      <p class="hint">狙い銘柄がなくても大丈夫です。ニュースのテーマ + 大型株 + 中型テーマ株を分析し、今注目すべき銘柄を表示します。</p>
+      <button class="btn btn-primary" onclick="loadRecommend(true)">おすすめを更新</button>
+      <div id="recommend-results"><div class="empty">「おすすめを更新」で銘柄と理由を表示</div></div>
+    </div>
+    <div class="card">
       <h2>クイック</h2>
-      <button class="btn btn-primary" onclick="goScan()">シグナルをスキャン</button>
+      <button class="btn btn-primary" onclick="goScan()">おすすめ銘柄をスキャン</button>
       <button class="btn btn-secondary" onclick="goPositions()">建玉を確認</button>
     </div>
   </section>
   <section class="panel" id="panel-scan">
+    <p class="hint">おすすめ上位銘柄をスキャンします（開始時に自動更新）</p>
     <button class="btn btn-primary" onclick="runScan()">スキャン実行</button>
     <div id="scan-results"><div class="empty">スキャンを実行してください</div></div>
   </section>
@@ -142,6 +154,7 @@ const PIN_KEY='trade_pin';
 const CTX_KEY='trade_ctx';
 let pin=localStorage.getItem(PIN_KEY)||'';
 let market='jp', style='day';
+let currentCodes=[];
 const saved=JSON.parse(localStorage.getItem(CTX_KEY)||'{}');
 if(saved.market) market=saved.market;
 if(saved.style) style=saved.style;
@@ -151,7 +164,7 @@ document.getElementById('sel-style').value=style;
 function ctxQs(){return `market=${market}&style=${style}`;}
 function toast(m){const e=document.getElementById('toast');e.textContent=m;e.classList.add('show');setTimeout(()=>e.classList.remove('show'),2500);}
 function login(){pin=document.getElementById('pin-input').value;if(!pin)return;localStorage.setItem(PIN_KEY,pin);document.getElementById('login-screen').classList.add('hidden');refreshStatus();}
-function onContextChange(){market=document.getElementById('sel-market').value;style=document.getElementById('sel-style').value;localStorage.setItem(CTX_KEY,JSON.stringify({market,style}));refreshStatus();}
+function onContextChange(){market=document.getElementById('sel-market').value;style=document.getElementById('sel-style').value;localStorage.setItem(CTX_KEY,JSON.stringify({market,style}));refreshStatus();loadRecommend();}
 async function api(path,opts={}){const sep=path.includes('?')?'&':'?';const url=path.startsWith('/api/')?path+sep+ctxQs():path;const h={'X-Pin':pin,...opts.headers||{}};if(opts.body)h['Content-Type']='application/json';const r=await fetch(url,{...opts,headers:h});if(r.status===401){localStorage.removeItem(PIN_KEY);location.reload();return null;}return r.json();}
 async function apiPost(path,body){const d=await api(path,{method:'POST',body:body?JSON.stringify(body):undefined});if(!d)return;if(d.message)toast(d.message);if(d.error)toast(d.error);refreshStatus();return d;}
 function showPanel(n){document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));document.getElementById('panel-'+n).classList.add('active');document.querySelectorAll('nav button').forEach(b=>b.classList.toggle('active',b.dataset.panel===n));if(n==='review'){loadReview();loadJournal();}}
@@ -167,6 +180,58 @@ async function refreshStatus(){
   b.textContent=d.notify_enabled?(d.demo_mode?'デモON':'通知ON'):'通知OFF';
   b.className='badge '+(d.notify_enabled?'on':'off');
   document.getElementById('watchlist').innerHTML=(d.watchlist||[]).map(t=>`<option value="${t}"></option>`).join('');
+}
+
+async function loadRecommend(force=false){
+  const el=document.getElementById('recommend-results');
+  if(!el)return;
+  if(market!=='jp'){
+    el.innerHTML='<div class="loading">分析中...</div>';
+    const d=await api('/api/recommend');if(!d)return;
+    if(!d.recommendations||!d.recommendations.length){el.innerHTML='<div class="empty">おすすめ銘柄がありません</div>';return;}
+    currentCodes=d.recommendations.map(r=>r.ticker).filter(Boolean);
+    el.innerHTML=d.recommendations.map((r,i)=>`<div class="card"><b>#${i+1} ${r.ticker}</b> ${r.name||''} — ${r.signal||'様子見'}</div>`).join('');
+    refreshStatus();return;
+  }
+  el.innerHTML='<div class="loading">チャート+ニュースを分析中...（1分ほどかかる場合があります）</div>';
+  const path='/api/recommendations'+(force?'?refresh=true':'');
+  const d=await api(path);if(!d)return;
+  if(d.error){el.innerHTML=`<div class="empty">${d.error}</div>`;return;}
+  if(!d.recommendations||!d.recommendations.length){el.innerHTML='<div class="empty">おすすめ銘柄がありません</div>';return;}
+  currentCodes=(d.codes||d.recommendations.map(r=>r.code||r.ticker)).filter(Boolean);
+  let h=`<p class="hint" style="margin-bottom:10px">チャート70% + ニュース30%で選定${d.cached?' (キャッシュ)':''}</p>`;
+  h+=`<div class="news-box"><div class="cond" style="margin-bottom:6px">本日のニューステーマ</div>`;
+  if(d.themes&&d.themes.length){
+    d.themes.forEach(t=>{h+=`<span class="theme-chip">${t.theme}</span>`;});
+    if(d.themes[0].headline){
+      h+=`<div class="cond" style="margin-top:8px">参考見出し: ${d.themes[0].headline}</div>`;
+    }
+  }else{
+    h+='<span class="theme-chip">テーマ未検出（大型株中心で選定）</span>';
+  }
+  h+='</div>';
+  d.recommendations.forEach((r,i)=>{
+    const code=r.code||r.ticker;
+    const badges=(r.badges||[]).map(b=>`<span class="news-badge">${b}</span>`).join('');
+    h+=`<div class="card" style="margin-top:8px">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <div><span class="rank-badge">#${i+1}</span> <b>${code}</b> ${r.name||''}${badges}</div>
+        <span class="score" style="color:#93c5fd;font-weight:700">${r.total_score}</span>
+      </div>
+      <div class="cond" style="margin-top:6px">チャート ${r.chart_score} / ニュース ${r.news_score||0}</div>
+      <div class="reason" style="margin-top:8px">${r.reason||(r.reasons&&r.reasons[0])||''}</div>
+    </div>`;
+  });
+  el.innerHTML=h;
+  refreshStatus();
+}
+
+async function startTrading(){
+  const body=currentCodes.length?{codes:currentCodes}:undefined;
+  const d=await apiPost('/api/start',body);
+  if(d&&d.ok&&d.scan_tickers){
+    toast('スキャン開始: '+d.scan_tickers.join(', '));
+  }
 }
 
 async function runScan(){
@@ -283,7 +348,7 @@ async function loadJournal(){
   h+='</div>';
   el.innerHTML=h;
 }
-if(pin){document.getElementById('login-screen').classList.add('hidden');refreshStatus();}
+if(pin){document.getElementById('login-screen').classList.add('hidden');refreshStatus();loadRecommend();}
 </script>
 </body>
 </html>

@@ -5,7 +5,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY trade_core.py server.py ./
+COPY trade_core.py trade_analytics.py trade_recommend.py trade_news.py recommend_news.py app_integration.py server.py ./
 COPY static/ ./static/
 
 ENV PORT=8765

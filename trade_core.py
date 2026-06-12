@@ -539,6 +539,15 @@ def _ctx(market: str, style: str) -> Ctx:
     return Ctx(market, style)
 
 
+def get_scan_tickers(market: str, style: str) -> list:
+    """おすすめキャッシュがあればそれを、なければデフォルトwatchlist"""
+    try:
+        import trade_recommend as tr
+        return tr.get_recommended_tickers(market, style)
+    except ImportError:
+        return MARKETS[market]["watchlist"]
+
+
 def action_status(market: str = "jp", style: str = "day") -> dict:
     ctx = _ctx(market, style)
     tuning = {}
@@ -547,13 +556,16 @@ def action_status(market: str = "jp", style: str = "day") -> dict:
         tuning = ta.get_effective_params(market, style)
     except ImportError:
         pass
+    scan_tickers = get_scan_tickers(market, style)
     return {
         "notify_enabled": notification_enabled(),
         "market": market,
         "style": style,
         "market_name": ctx.m["name"],
         "style_name": ctx.s["name"],
-        "watchlist": ctx.m["watchlist"],
+        "watchlist": scan_tickers,
+        "default_watchlist": ctx.m["watchlist"],
+        "recommended_at": _get_setting(f"recommended_{market}_{style}_at"),
         "interval": ctx.s["interval"],
         "markets": {k: v["name"] for k, v in MARKETS.items()},
         "styles": {k: v["name"] for k, v in STYLES.items()},
@@ -565,7 +577,7 @@ def action_status(market: str = "jp", style: str = "day") -> dict:
 
 def action_scan(market: str = "jp", style: str = "day", tickers=None) -> dict:
     ctx = _ctx(market, style)
-    tickers = tickers or ctx.m["watchlist"]
+    tickers = tickers or get_scan_tickers(market, style)
     results = []
 
     for code in tickers:
@@ -789,7 +801,8 @@ def _close_all_demo_positions(market: str, style: str) -> list:
     return closed
 
 
-def action_start(market: str = "jp", style: str = "day", demo: bool = True) -> dict:
+def action_start(market: str = "jp", style: str = "day", demo: bool = True,
+                 tickers: list | None = None) -> dict:
     set_notification_enabled(True)
     _set_setting("demo_mode", "1" if demo else "0")
     _set_setting("session_market", market)
@@ -799,11 +812,48 @@ def action_start(market: str = "jp", style: str = "day", demo: bool = True) -> d
     message = f"{label}を開始します"
     if demo:
         message += "\nシグナル検出時に仮想売買を自動記録します"
+
+    scan_tickers = None
+    if tickers:
+        scan_tickers = [str(t).upper() for t in tickers if t]
+        _set_setting(f"recommended_{market}_{style}", json.dumps(scan_tickers))
+        _set_setting(
+            f"recommended_{market}_{style}_at",
+            datetime.now().strftime("%Y-%m-%d %H:%M"),
+        )
+
+    recommend_summary = ""
+    if scan_tickers:
+        message += f"\nスキャン対象: {', '.join(scan_tickers)}"
+        recommend_summary = ", ".join(scan_tickers[:3])
+    else:
+        try:
+            import trade_recommend as tr
+            rec = tr.action_recommend(market, style, limit=5)
+            tops = rec.get("recommendations", [])
+            if tops:
+                lines = []
+                for i, r in enumerate(tops[:3], 1):
+                    code = r.get("ticker") or r.get("code", "")
+                    sig = r.get("signal", "様子見")
+                    lines.append(f"{i}.{code}({r.get('name', '')}) {sig}")
+                recommend_summary = " / ".join(lines)
+                message += "\nおすすめ: " + recommend_summary
+                scan_tickers = [
+                    r.get("ticker") or r.get("code")
+                    for r in tops if r.get("ticker") or r.get("code")
+                ]
+        except Exception:
+            pass
+
     send_notification("Trade Start", message, force=True)
     if demo:
-        action_scan(market, style)
-    return {"ok": True, "message": message, "notify_enabled": True,
-            "demo_mode": demo}
+        action_scan(market, style, scan_tickers)
+    return {
+        "ok": True, "message": message, "notify_enabled": True,
+        "demo_mode": demo, "recommend_summary": recommend_summary,
+        "scan_tickers": scan_tickers or get_scan_tickers(market, style),
+    }
 
 
 def action_end(market: str = "jp", style: str = "day") -> dict:
