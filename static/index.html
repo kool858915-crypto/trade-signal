@@ -82,8 +82,8 @@ nav button span{display:block;font-size:18px;margin-bottom:2px}
   <section class="panel active" id="panel-home">
     <div class="card">
       <h2>取引セッション</h2>
-      <p class="hint">開始で通知ON、終了で通知OFF。建玉の損切りは自動監視します。</p>
-      <button class="btn btn-start" onclick="apiPost('/api/start')">取引を開始します</button>
+      <p class="hint">開始でデモ売買を自動記録。シグナル検出→仮想エントリー→損切り/利確で自動決済。実売買不要。</p>
+      <button class="btn btn-start" onclick="apiPost('/api/start')">取引を開始します（デモ）</button>
       <button class="btn btn-end" onclick="apiPost('/api/end')">終わります</button>
     </div>
     <div class="card">
@@ -164,7 +164,7 @@ function fmtPrice(v,c){if(c==='円')return v.toLocaleString()+'円';return '$'+v
 async function refreshStatus(){
   const d=await api('/api/status');if(!d)return;
   const b=document.getElementById('status-badge');
-  b.textContent=d.notify_enabled?'通知ON':'通知OFF';
+  b.textContent=d.notify_enabled?(d.demo_mode?'デモON':'通知ON'):'通知OFF';
   b.className='badge '+(d.notify_enabled?'on':'off');
   document.getElementById('watchlist').innerHTML=(d.watchlist||[]).map(t=>`<option value="${t}"></option>`).join('');
 }
@@ -183,9 +183,10 @@ async function runScan(){
     if(r.plan){h+=`<div class="cond" style="margin-top:6px">損切り ${r.plan.stop.toLocaleString()} / 利確 ${r.plan.target.toLocaleString()}</div>`;
       if(r.plan.qty>0)h+=`<div class="cond">推奨 ${r.plan.qty}</div>`;}
     if(r.signal==='買い'||r.signal==='売り'){
+      h+=`<div class="cond" style="margin-top:6px;color:#f59e0b">デモモード時は自動エントリーされます</div>`;
       const side=r.signal==='売り'?'short':'buy';
       const q=(r.plan&&r.plan.qty)?r.plan.qty:(market==='jp'?100:1);
-      h+=`<button class="btn btn-secondary" style="margin-top:8px" onclick="prefill('${r.ticker}',${r.price},${q},'${side}')">記録する</button>`;}
+      h+=`<button class="btn btn-secondary" style="margin-top:8px" onclick="prefill('${r.ticker}',${r.price},${q},'${side}')">手動で記録（実売買）</button>`;}
     return h+'</div>';
   }).join('');
 }
@@ -206,7 +207,8 @@ async function loadPositions(){
   if(!d.positions.length){el.innerHTML='<div class="empty">建玉がありません</div>';return;}
   const cur=d.currency||'円';
   el.innerHTML=d.positions.map(p=>{
-    let h=`<div class="card"><div style="display:flex;justify-content:space-between"><b>${p.ticker}</b><span class="${p.side==='買い'?'pnl-pos':'pnl-neg'}">${p.side} ${p.qty}</span></div>
+    const demo=p.is_demo?'<span style="color:#f59e0b;font-size:11px"> [デモ]</span>':'';
+    let h=`<div class="card"><div style="display:flex;justify-content:space-between"><b>${p.ticker}${demo}</b><span class="${p.side==='買い'?'pnl-pos':'pnl-neg'}">${p.side} ${p.qty}</span></div>
       <div class="cond">@ ${p.entry_price.toLocaleString()} (${p.entry_time})</div>`;
     if(p.current_price!==undefined){
       const cls=p.pnl>=0?'pnl-pos':'pnl-neg';
@@ -233,6 +235,11 @@ async function loadReview(){
     <div class="stat"><span>合計損益</span><b class="${d.total_pnl>=0?'pnl-pos':'pnl-neg'}">${fmtPnl(d.total_pnl,c)}</b></div>
     <div class="stat"><span>勝率</span><span>${d.win_rate.toFixed(1)}% (${d.wins}勝${d.losses}敗)</span></div>
     <div class="stat"><span>期待値</span><span>${fmtPnl(d.expectancy,c)}</span></div></div>`;
+  if(d.demo_stats){
+    h+=`<div class="card"><h2>デモ成績 (${d.demo_stats.count}回)</h2>
+      <div class="stat"><span>損益</span><span class="${d.demo_stats.total_pnl>=0?'pnl-pos':'pnl-neg'}">${fmtPnl(d.demo_stats.total_pnl,c)}</span></div>
+      <div class="stat"><span>勝率</span><span>${d.demo_stats.win_rate.toFixed(1)}%</span></div></div>`;
+  }
   if(d.by_ticker.length){h+='<div class="card"><h2>銘柄別</h2>';
     d.by_ticker.forEach(t=>{h+=`<div class="stat"><span>${t.ticker}(${t.trades})</span><span class="${t.pnl>=0?'pnl-pos':'pnl-neg'}">${fmtPnl(t.pnl,c)}</span></div>`;});
     h+='</div>';}

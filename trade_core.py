@@ -182,6 +182,9 @@ def _migrate_columns(conn):
         ("trades", "entry_conds_json", "TEXT"),
         ("trades", "entry_signal", "TEXT"),
         ("trades", "followed_signal", "INTEGER DEFAULT 0"),
+        ("positions", "is_demo", "INTEGER DEFAULT 0"),
+        ("trades", "is_demo", "INTEGER DEFAULT 0"),
+        ("trades", "exit_reason", "TEXT"),
     ]
     for table, col, typ in migrations:
         cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
@@ -216,6 +219,28 @@ def notification_enabled() -> bool:
 def set_notification_enabled(enabled: bool):
     _set_setting("notify_enabled", "1" if enabled else "0")
     _set_setting("notify_updated_at", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+
+
+def demo_mode_enabled() -> bool:
+    return _get_setting("demo_mode", "0") == "1"
+
+
+def _session_context() -> tuple[str, str]:
+    return (
+        _get_setting("session_market", "jp"),
+        _get_setting("session_style", "day"),
+    )
+
+
+def _has_open_position(market: str, style: str, ticker: str) -> bool:
+    with _db_lock:
+        conn = _conn()
+        row = conn.execute(
+            "SELECT 1 FROM positions WHERE market=? AND style=? AND ticker=? LIMIT 1",
+            (market, style, ticker.upper()),
+        ).fetchone()
+        conn.close()
+    return row is not None
 
 
 # ============================================================
@@ -534,6 +559,7 @@ def action_status(market: str = "jp", style: str = "day") -> dict:
         "styles": {k: v["name"] for k, v in STYLES.items()},
         "tuning": tuning,
         "session_active": _active_session_id() is not None,
+        "demo_mode": demo_mode_enabled(),
     }
 
 
@@ -580,25 +606,210 @@ def action_scan(market: str = "jp", style: str = "day", tickers=None) -> dict:
         if sid:
             _log_signal(sid, market, style, code, r)
 
+    demo_entries = _process_demo_entries(market, style, results)
     return {
         "scanned_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
         "market": market,
         "style": style,
         "interval": ctx.s["interval"],
         "results": results,
+        "demo_entries": demo_entries,
     }
 
 
-def action_start(market: str = "jp", style: str = "day") -> dict:
+def _process_demo_entries(market: str, style: str, results: list) -> list:
+    """シグナル検出時にデモ建玉を自動作成"""
+    if not demo_mode_enabled():
+        return []
+    entries = []
+    for item in results:
+        if item.get("signal") not in ("買い", "売り") or "plan" not in item:
+            continue
+        ticker = item["ticker"].upper()
+        if _has_open_position(market, style, ticker):
+            continue
+        entered = _demo_open_position(
+            market, style, ticker, item["signal"],
+            item["price"], item["plan"], item.get("conds", []),
+        )
+        if entered:
+            entries.append(entered)
+    return entries
+
+
+def _demo_open_position(market: str, style: str, ticker: str, side: str,
+                        price: float, plan: dict, conds: list) -> dict | None:
+    ctx = _ctx(market, style)
+    qty = plan.get("qty") or ctx.m["unit"]
+    if qty <= 0:
+        qty = ctx.m["unit"]
+    stop_val, target_val = plan.get("stop"), plan.get("target")
+    conds_dict = {c["name"]: c["ok"] for c in conds} if conds else {}
+    conds_json = json.dumps(conds_dict, ensure_ascii=False)
+    sid = _active_session_id()
+
+    with _db_lock:
+        conn = _conn()
+        conn.execute(
+            """INSERT INTO positions
+               (market,style,ticker,side,entry_time,entry_price,qty,
+                stop_loss,take_profit,session_id,entry_conds_json,
+                entry_signal,is_demo)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,1)""",
+            (market, style, ticker, side,
+             datetime.now().strftime("%Y-%m-%d %H:%M"),
+             price, qty, stop_val, target_val,
+             sid, conds_json, side),
+        )
+        conn.commit()
+        conn.close()
+
+    lines = [f"[デモ] {ticker} {side}", f"価格: {ctx.fmt(price)}", f"数量: {qty}"]
+    if stop_val:
+        lines.append(f"損切り: {ctx.fmt(stop_val)}")
+    if target_val:
+        lines.append(f"利確: {ctx.fmt(target_val)}")
+    send_notification("Demo Entry", "\n".join(lines))
+    return {"ticker": ticker, "side": side, "price": price, "qty": qty}
+
+
+def _close_position_row(row, exit_price: float, reason: str = "manual",
+                        notify: bool = True) -> dict:
+    """建玉を決済して trades に記録"""
+    ctx = _ctx(row["market"], row["style"])
+    entry = float(row["entry_price"])
+    qty = int(row["qty"])
+    sign = 1 if row["side"] == "買い" else -1
+    pnl = (exit_price - entry) * qty * sign
+    is_demo = int(row["is_demo"] if row["is_demo"] is not None else 0)
+
+    followed = 0
+    if row["entry_signal"] and row["side"]:
+        followed = int(
+            (row["side"] == "買い" and row["entry_signal"] == "買い") or
+            (row["side"] == "売り" and row["entry_signal"] == "売り")
+        )
+
+    with _db_lock:
+        conn = _conn()
+        conn.execute(
+            """INSERT INTO trades
+               (market,style,ticker,side,entry_time,entry_price,qty,
+                stop_loss,take_profit,exit_time,exit_price,pnl,result,
+                session_id,entry_conds_json,entry_signal,followed_signal,
+                is_demo,exit_reason)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (row["market"], row["style"], row["ticker"], row["side"],
+             row["entry_time"], entry, qty, row["stop_loss"], row["take_profit"],
+             datetime.now().strftime("%Y-%m-%d %H:%M"), exit_price, pnl,
+             "win" if pnl > 0 else "loss",
+             row["session_id"], row["entry_conds_json"],
+             row["entry_signal"], followed, is_demo, reason),
+        )
+        conn.execute("DELETE FROM positions WHERE id=?", (row["id"],))
+        conn.commit()
+        conn.close()
+
+    if notify:
+        prefix = "[デモ] " if is_demo else ""
+        send_notification(
+            "Demo Exit" if is_demo else "Exit",
+            "\n".join([
+                f"{prefix}{row['ticker']} {row['side']} ({reason})",
+                f"エントリー: {ctx.fmt(entry)}",
+                f"決済: {ctx.fmt(exit_price)}",
+                f"損益: {ctx.fmt_pnl(pnl)}",
+            ]),
+        )
+    return {"ok": True, "ticker": row["ticker"], "pnl": pnl, "qty": qty,
+            "is_demo": bool(is_demo), "reason": reason}
+
+
+def _demo_check_exits() -> list:
+    """デモ建玉の損切り・利確を自動決済"""
+    closed = []
+    with _db_lock:
+        conn = _conn()
+        rows = conn.execute(
+            "SELECT * FROM positions WHERE is_demo=1"
+        ).fetchall()
+        conn.close()
+
+    for row in rows:
+        ctx = _ctx(row["market"], row["style"])
+        try:
+            cur = float(fetch_data(row["ticker"], ctx)["Close"].iloc[-1])
+        except Exception:
+            continue
+
+        side = row["side"]
+        reason = None
+        exit_price = cur
+
+        if row["stop_loss"]:
+            stop = float(row["stop_loss"])
+            if side == "買い" and cur <= stop:
+                reason, exit_price = "損切り", stop
+            elif side == "売り" and cur >= stop:
+                reason, exit_price = "損切り", stop
+
+        if not reason and row["take_profit"]:
+            target = float(row["take_profit"])
+            if side == "買い" and cur >= target:
+                reason, exit_price = "利確", target
+            elif side == "売り" and cur <= target:
+                reason, exit_price = "利確", target
+
+        if reason:
+            result = _close_position_row(row, exit_price, reason=reason, notify=True)
+            closed.append(result)
+    return closed
+
+
+def _close_all_demo_positions(market: str, style: str) -> list:
+    """セッション終了時に残りデモ建玉を現値で決済"""
+    closed = []
+    with _db_lock:
+        conn = _conn()
+        rows = conn.execute(
+            "SELECT * FROM positions WHERE is_demo=1 AND market=? AND style=?",
+            (market, style),
+        ).fetchall()
+        conn.close()
+
+    for row in rows:
+        ctx = _ctx(market, style)
+        try:
+            cur = float(fetch_data(row["ticker"], ctx)["Close"].iloc[-1])
+        except Exception:
+            cur = float(row["entry_price"])
+        closed.append(_close_position_row(
+            row, cur, reason="セッション終了", notify=False,
+        ))
+    return closed
+
+
+def action_start(market: str = "jp", style: str = "day", demo: bool = True) -> dict:
     set_notification_enabled(True)
+    _set_setting("demo_mode", "1" if demo else "0")
+    _set_setting("session_market", market)
+    _set_setting("session_style", style)
     _create_session(market, style)
-    message = "取引を開始します"
+    label = "デモ取引" if demo else "取引"
+    message = f"{label}を開始します"
+    if demo:
+        message += "\nシグナル検出時に仮想売買を自動記録します"
     send_notification("Trade Start", message, force=True)
-    return {"ok": True, "message": message, "notify_enabled": True}
+    if demo:
+        action_scan(market, style)
+    return {"ok": True, "message": message, "notify_enabled": True,
+            "demo_mode": demo}
 
 
 def action_end(market: str = "jp", style: str = "day") -> dict:
+    demo_closed = _close_all_demo_positions(market, style)
     summary = _close_session(market, style)
+    summary["demo_closed"] = len(demo_closed)
     message = "終わります"
     if summary["trades"]:
         ctx = _ctx(market, style)
@@ -609,8 +820,13 @@ def action_end(market: str = "jp", style: str = "day") -> dict:
         )
     if summary.get("tuning_note"):
         message += f"\n精度調整: {summary['tuning_note']}"
+    if demo_closed:
+        demo_pnl = sum(d["pnl"] for d in demo_closed)
+        ctx = _ctx(market, style)
+        message += f"\nデモ決済: {len(demo_closed)}件 損益{ctx.fmt_pnl(demo_pnl)}"
     send_notification("Trade End", message, force=True)
     set_notification_enabled(False)
+    _set_setting("demo_mode", "0")
     return {"ok": True, "message": message, "notify_enabled": False,
             "daily_summary": summary}
 
@@ -650,8 +866,8 @@ def action_buy(market: str, style: str, ticker: str, price: float, qty: int,
         conn.execute(
             """INSERT INTO positions
                (market,style,ticker,side,entry_time,entry_price,qty,
-                stop_loss,take_profit,session_id,entry_conds_json,entry_signal)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                stop_loss,take_profit,session_id,entry_conds_json,entry_signal,is_demo)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,0)""",
             (market, style, ticker, side,
              datetime.now().strftime("%Y-%m-%d %H:%M"),
              price, qty, stop_val, target_val,
@@ -682,6 +898,7 @@ def _check_position_row(row, ctx: Ctx, notify: bool = True) -> dict:
         "stop_loss": row["stop_loss"],
         "take_profit": row["take_profit"],
         "market": row["market"], "style": row["style"],
+        "is_demo": bool(row["is_demo"] if row["is_demo"] is not None else 0),
     }
     try:
         cur = float(fetch_data(row["ticker"], ctx)["Close"].iloc[-1])
@@ -694,23 +911,28 @@ def _check_position_row(row, ctx: Ctx, notify: bool = True) -> dict:
             hit = cur <= stop if row["side"] == "買い" else cur >= stop
             item["stop_hit"] = hit
             if hit and notify and not row["stop_alerted"]:
-                send_notification(
-                    "Stop Loss",
-                    "\n".join([
-                        f"銘柄: {row['ticker']}", f"売買: {row['side']}",
-                        f"数量: {qty}株", f"現値: {ctx.fmt(cur)}",
-                        f"損切り: {ctx.fmt(stop)}", f"含み損益: {ctx.fmt_pnl(pnl)}",
-                    ]),
-                    priority="urgent",
-                )
-                with _db_lock:
-                    conn = _conn()
-                    conn.execute(
-                        "UPDATE positions SET stop_alerted=1 WHERE id=?",
-                        (row["id"],),
+                is_demo = bool(row["is_demo"] if row["is_demo"] is not None else 0)
+                if is_demo:
+                    _close_position_row(row, stop, reason="損切り", notify=True)
+                    item["closed"] = True
+                else:
+                    send_notification(
+                        "Stop Loss",
+                        "\n".join([
+                            f"銘柄: {row['ticker']}", f"売買: {row['side']}",
+                            f"数量: {qty}株", f"現値: {ctx.fmt(cur)}",
+                            f"損切り: {ctx.fmt(stop)}", f"含み損益: {ctx.fmt_pnl(pnl)}",
+                        ]),
+                        priority="urgent",
                     )
-                    conn.commit()
-                    conn.close()
+                    with _db_lock:
+                        conn = _conn()
+                        conn.execute(
+                            "UPDATE positions SET stop_alerted=1 WHERE id=?",
+                            (row["id"],),
+                        )
+                        conn.commit()
+                        conn.close()
     except Exception:
         item["error"] = "現値取得失敗"
     return item
@@ -745,44 +967,11 @@ def action_sell(market: str, style: str, ticker: str, price: float) -> dict:
         if not row:
             conn.close()
             return {"ok": False, "error": f"{ticker} の建玉が見つかりません"}
-
-        entry = float(row["entry_price"])
-        qty = int(row["qty"])
-        sign = 1 if row["side"] == "買い" else -1
-        pnl = (price - entry) * qty * sign
-
-        followed = 0
-        if row["entry_signal"] and row["side"]:
-            followed = int(
-                (row["side"] == "買い" and row["entry_signal"] == "買い") or
-                (row["side"] == "売り" and row["entry_signal"] == "売り")
-            )
-        conn.execute(
-            """INSERT INTO trades
-               (market,style,ticker,side,entry_time,entry_price,qty,
-                stop_loss,take_profit,exit_time,exit_price,pnl,result,
-                session_id,entry_conds_json,entry_signal,followed_signal)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (market, style, row["ticker"], row["side"], row["entry_time"],
-             entry, qty, row["stop_loss"], row["take_profit"],
-             datetime.now().strftime("%Y-%m-%d %H:%M"), price, pnl,
-             "win" if pnl > 0 else "loss",
-             row["session_id"], row["entry_conds_json"],
-             row["entry_signal"], followed),
-        )
-        conn.execute("DELETE FROM positions WHERE id=?", (row["id"],))
-        conn.commit()
         conn.close()
 
-    send_notification(
-        "Exit",
-        "\n".join([
-            f"銘柄: {ticker}", f"売買: {row['side']}", f"数量: {qty}",
-            f"エントリー: {ctx.fmt(entry)}", f"決済: {ctx.fmt(price)}",
-            f"損益: {ctx.fmt_pnl(pnl)}",
-        ]),
-    )
-    return {"ok": True, "ticker": ticker, "pnl": pnl, "qty": qty}
+    result = _close_position_row(row, price, reason="手動決済", notify=True)
+    result["currency"] = ctx.m["currency"]
+    return result
 
 
 def action_review(market: str = "jp", style: str = "day") -> dict:
@@ -800,28 +989,48 @@ def action_review(market: str = "jp", style: str = "day") -> dict:
                 "message": "決済済みトレードがまだありません",
                 "market": market, "style": style}
 
-    pnls = [float(r["pnl"]) for r in rows]
-    wins = [p for p in pnls if p > 0]
-    losses = [p for p in pnls if p <= 0]
-    total = sum(pnls)
-    gross_win = sum(wins)
-    gross_loss = abs(sum(losses))
+    demo_rows = [r for r in rows if r["is_demo"]]
+    real_rows = [r for r in rows if not r["is_demo"]]
 
+    def _stats(subset):
+        if not subset:
+            return None
+        pnls = [float(r["pnl"]) for r in subset]
+        wins = [p for p in pnls if p > 0]
+        losses = [p for p in pnls if p <= 0]
+        total = sum(pnls)
+        gross_win = sum(wins)
+        gross_loss = abs(sum(losses))
+        return {
+            "count": len(pnls),
+            "total_pnl": total,
+            "win_rate": len(wins) / len(pnls) * 100,
+            "wins": len(wins),
+            "losses": len(losses),
+            "expectancy": total / len(pnls),
+            "profit_factor": gross_win / gross_loss if gross_loss > 0 else None,
+        }
+
+    all_stats = _stats(rows)
     by_ticker = {}
     for r in rows:
         by_ticker.setdefault(r["ticker"], []).append(float(r["pnl"]))
 
     return {
         "ok": True,
-        "count": len(pnls),
-        "total_pnl": total,
-        "win_rate": len(wins) / len(pnls) * 100,
-        "wins": len(wins),
-        "losses": len(losses),
-        "avg_win": gross_win / len(wins) if wins else None,
-        "avg_loss": gross_loss / len(losses) if losses else None,
-        "profit_factor": gross_win / gross_loss if gross_loss > 0 else None,
-        "expectancy": total / len(pnls),
+        "count": all_stats["count"],
+        "total_pnl": all_stats["total_pnl"],
+        "win_rate": all_stats["win_rate"],
+        "wins": all_stats["wins"],
+        "losses": all_stats["losses"],
+        "avg_win": (sum(float(r["pnl"]) for r in rows if float(r["pnl"]) > 0) /
+                    all_stats["wins"]) if all_stats["wins"] else None,
+        "avg_loss": (abs(sum(float(r["pnl"]) for r in rows if float(r["pnl"]) <= 0)) /
+                     all_stats["losses"]) if all_stats["losses"] else None,
+        "profit_factor": all_stats["profit_factor"],
+        "expectancy": all_stats["expectancy"],
+        "demo_stats": _stats(demo_rows),
+        "real_stats": _stats(real_rows),
         "currency": ctx.m["currency"],
         "market": market,
         "style": style,
@@ -831,8 +1040,9 @@ def action_review(market: str = "jp", style: str = "day") -> dict:
         ],
         "recent": [
             {"exit_time": r["exit_time"], "ticker": r["ticker"],
-             "side": r["side"], "pnl": float(r["pnl"])}
-            for r in rows[-5:]
+             "side": r["side"], "pnl": float(r["pnl"]),
+             "is_demo": bool(r["is_demo"]), "exit_reason": r["exit_reason"]}
+            for r in rows[-8:]
         ],
     }
 
@@ -859,13 +1069,20 @@ def action_journal(market: str = "jp", style: str = "day") -> dict:
 
 
 def action_monitor_all() -> dict:
-    """全建玉の損切りチェック (クラウドの定期実行用)"""
+    """損切り監視 + デモの自動スキャン・決済"""
     if not notification_enabled():
         return {"ok": True, "checked": 0, "alerts": 0, "skipped": "notify_off"}
 
+    demo_closed = _demo_check_exits()
+    demo_entries = []
+    if demo_mode_enabled():
+        market, style = _session_context()
+        scan = action_scan(market, style)
+        demo_entries = scan.get("demo_entries", [])
+
     with _db_lock:
         conn = _conn()
-        rows = conn.execute("SELECT * FROM positions").fetchall()
+        rows = conn.execute("SELECT * FROM positions WHERE is_demo=0 OR is_demo IS NULL").fetchall()
         conn.close()
 
     alerts = 0
@@ -873,11 +1090,14 @@ def action_monitor_all() -> dict:
         ctx = _ctx(row["market"], row["style"])
         before = row["stop_alerted"]
         item = _check_position_row(row, ctx, notify=True)
-        if item.get("stop_hit") and not before:
+        if item.get("stop_hit") and not before and not item.get("closed"):
             alerts += 1
 
-    return {"ok": True, "checked": len(rows), "alerts": alerts,
-            "notify_enabled": True}
+    return {
+        "ok": True, "checked": len(rows), "alerts": alerts,
+        "demo_closed": len(demo_closed), "demo_entries": len(demo_entries),
+        "notify_enabled": True,
+    }
 
 
 # 起動時にDB初期化
