@@ -119,6 +119,10 @@ class AppHandler(BaseHTTPRequestHandler):
             _json_response(self, data)
         elif path == "/api/review":
             _json_response(self, tc.action_review(market, style))
+        elif path == "/api/validate":
+            _json_response(self, tc.action_validate(market, style))
+        elif path == "/api/journal":
+            _json_response(self, tc.action_journal(market, style))
         else:
             _json_response(self, {"error": "not found"}, 404)
 
@@ -143,9 +147,9 @@ class AppHandler(BaseHTTPRequestHandler):
             return
 
         if path == "/api/start":
-            _json_response(self, tc.action_start())
+            _json_response(self, tc.action_start(market, style))
         elif path == "/api/end":
-            _json_response(self, tc.action_end())
+            _json_response(self, tc.action_end(market, style))
         elif path == "/api/notify-test":
             _json_response(self, tc.action_notify_test())
         elif path == "/api/buy":

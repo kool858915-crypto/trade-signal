@@ -121,6 +121,13 @@ nav button span{display:block;font-size:18px;margin-bottom:2px}
   <section class="panel" id="panel-review">
     <button class="btn btn-secondary" onclick="loadReview()">更新</button>
     <div id="review-content"><div class="empty">成績データがありません</div></div>
+    <div class="card" style="margin-top:12px">
+      <h2>検証・精度改善</h2>
+      <p class="hint">毎日の取引記録を分析し、シグナル条件を自動調整します。「終わります」実行時に反映。</p>
+      <button class="btn btn-primary" onclick="loadValidate()">検証レポート</button>
+    </div>
+    <div id="validate-content"></div>
+    <div id="journal-content"></div>
   </section>
 </main>
 <nav>
@@ -147,7 +154,7 @@ function login(){pin=document.getElementById('pin-input').value;if(!pin)return;l
 function onContextChange(){market=document.getElementById('sel-market').value;style=document.getElementById('sel-style').value;localStorage.setItem(CTX_KEY,JSON.stringify({market,style}));refreshStatus();}
 async function api(path,opts={}){const sep=path.includes('?')?'&':'?';const url=path.startsWith('/api/')?path+sep+ctxQs():path;const h={'X-Pin':pin,...opts.headers||{}};if(opts.body)h['Content-Type']='application/json';const r=await fetch(url,{...opts,headers:h});if(r.status===401){localStorage.removeItem(PIN_KEY);location.reload();return null;}return r.json();}
 async function apiPost(path,body){const d=await api(path,{method:'POST',body:body?JSON.stringify(body):undefined});if(!d)return;if(d.message)toast(d.message);if(d.error)toast(d.error);refreshStatus();return d;}
-function showPanel(n){document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));document.getElementById('panel-'+n).classList.add('active');document.querySelectorAll('nav button').forEach(b=>b.classList.toggle('active',b.dataset.panel===n));if(n==='review')loadReview();}
+function showPanel(n){document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));document.getElementById('panel-'+n).classList.add('active');document.querySelectorAll('nav button').forEach(b=>b.classList.toggle('active',b.dataset.panel===n));if(n==='review'){loadReview();loadJournal();}}
 function goScan(){showPanel('scan');runScan();}
 function goPositions(){showPanel('positions');loadPositions();}
 function sigCls(s){return s==='買い'?'signal-buy':s==='売り'?'signal-sell':'signal-wait';}
@@ -229,6 +236,44 @@ async function loadReview(){
   if(d.by_ticker.length){h+='<div class="card"><h2>銘柄別</h2>';
     d.by_ticker.forEach(t=>{h+=`<div class="stat"><span>${t.ticker}(${t.trades})</span><span class="${t.pnl>=0?'pnl-pos':'pnl-neg'}">${fmtPnl(t.pnl,c)}</span></div>`;});
     h+='</div>';}
+  el.innerHTML=h;
+}
+async function loadValidate(){
+  const el=document.getElementById('validate-content');
+  el.innerHTML='<div class="loading">検証中...</div>';
+  const d=await api('/api/validate');if(!d)return;
+  if(!d.count){el.innerHTML='<div class="empty">検証用データがまだありません</div>';return;}
+  const c=d.currency||(market==='jp'?'円':'$');
+  let h=`<div class="card"><h2>検証結果 (${d.count}回)</h2>
+    <div class="stat"><span>勝率</span><span>${d.win_rate.toFixed(1)}%</span></div>`;
+  if(d.current_tuning&&d.current_tuning.min_score){
+    h+=`<div class="stat"><span>現在の厳しさ</span><span>min_score=${d.current_tuning.min_score}</span></div>`;}
+  h+='</div>';
+  if(d.recommendations&&d.recommendations.length){
+    h+='<div class="card"><h2>提案</h2>';
+    d.recommendations.forEach(r=>{h+=`<div class="cond">• ${r}</div>`;});
+    h+='</div>';
+  }
+  if(d.condition_ranking&&d.condition_ranking.length){
+    h+='<div class="card"><h2>条件別勝率</h2>';
+    d.condition_ranking.forEach(c=>{
+      h+=`<div class="stat"><span>${c.condition}(${c.trades})</span><span>${c.win_rate.toFixed(0)}%</span></div>`;
+    });
+    h+='</div>';
+  }
+  el.innerHTML=h;
+}
+async function loadJournal(){
+  const el=document.getElementById('journal-content');
+  const d=await api('/api/journal');if(!d||!d.sessions.length){el.innerHTML='';return;}
+  const c=market==='jp'?'円':'$';
+  let h='<div class="card"><h2>日次記録</h2>';
+  d.sessions.forEach(s=>{
+    const pnl=s.total_pnl||0;
+    h+=`<div class="stat"><span>${s.session_date}</span><span>${s.trades_count||0}回 ${pnl>=0?'+':''}${Math.round(pnl).toLocaleString()}${c==='円'?'円':'$'}</span></div>`;
+    if(s.tuning_applied)h+=`<div class="cond">調整: ${s.tuning_applied}</div>`;
+  });
+  h+='</div>';
   el.innerHTML=h;
 }
 if(pin){document.getElementById('login-screen').classList.add('hidden');refreshStatus();}

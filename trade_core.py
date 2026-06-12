@@ -147,9 +147,46 @@ def init_db():
                 exit_time TEXT, exit_price REAL,
                 pnl REAL, result TEXT
             );
+            CREATE TABLE IF NOT EXISTS daily_sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                market TEXT, style TEXT,
+                session_date TEXT,
+                started_at TEXT, ended_at TEXT,
+                trades_count INTEGER DEFAULT 0,
+                wins INTEGER DEFAULT 0,
+                losses INTEGER DEFAULT 0,
+                total_pnl REAL DEFAULT 0,
+                tuning_applied TEXT
+            );
+            CREATE TABLE IF NOT EXISTS signal_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id INTEGER,
+                market TEXT, style TEXT,
+                logged_at TEXT,
+                ticker TEXT, signal TEXT,
+                price REAL, rsi REAL, score INTEGER,
+                conds_json TEXT
+            );
         """)
+        _migrate_columns(conn)
         conn.commit()
         conn.close()
+
+
+def _migrate_columns(conn):
+    migrations = [
+        ("positions", "session_id", "INTEGER"),
+        ("positions", "entry_conds_json", "TEXT"),
+        ("positions", "entry_signal", "TEXT"),
+        ("trades", "session_id", "INTEGER"),
+        ("trades", "entry_conds_json", "TEXT"),
+        ("trades", "entry_signal", "TEXT"),
+        ("trades", "followed_signal", "INTEGER DEFAULT 0"),
+    ]
+    for table, col, typ in migrations:
+        cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+        if col not in cols:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
 
 
 def _get_setting(key: str, default=None):
@@ -239,10 +276,128 @@ def add_indicators(df: pd.DataFrame, ctx: Ctx) -> pd.DataFrame:
     return df
 
 
+def _get_params(ctx: Ctx) -> dict:
+    try:
+        import trade_analytics as ta
+        return ta.get_effective_params(ctx.market, ctx.style)
+    except ImportError:
+        return {
+            "min_score": COMMON["min_score"],
+            "vol_surge_ratio": ctx.s["vol_surge_ratio"],
+            "require_volume": False,
+        }
+
+
+def _active_session_id() -> int | None:
+    raw = _get_setting("active_session_id")
+    return int(raw) if raw else None
+
+
+def _create_session(market: str, style: str) -> int:
+    now = datetime.now()
+    with _db_lock:
+        conn = _conn()
+        cur = conn.execute(
+            """INSERT INTO daily_sessions
+               (market, style, session_date, started_at)
+               VALUES (?,?,?,?)""",
+            (market, style, now.strftime("%Y-%m-%d"), now.strftime("%Y-%m-%d %H:%M")),
+        )
+        sid = cur.lastrowid
+        conn.commit()
+        conn.close()
+    _set_setting("active_session_id", str(sid))
+    return sid
+
+
+def _log_signal(session_id, market, style, ticker, r: dict):
+    conds_json = json.dumps({k: bool(v) for k, v in r["conds"].items()}, ensure_ascii=False)
+    with _db_lock:
+        conn = _conn()
+        conn.execute(
+            """INSERT INTO signal_logs
+               (session_id, market, style, logged_at, ticker, signal,
+                price, rsi, score, conds_json)
+               VALUES (?,?,?,?,?,?,?,?,?,?)""",
+            (session_id, market, style,
+             datetime.now().strftime("%Y-%m-%d %H:%M"),
+             ticker, r["signal"], r["price"], r["rsi"],
+             r.get("score", 0), conds_json),
+        )
+        conn.commit()
+        conn.close()
+
+
+def _snapshot_entry(ctx: Ctx, ticker: str, side: str) -> dict:
+    try:
+        df = add_indicators(fetch_data(ticker, ctx), ctx)
+        if len(df) < ctx.s["slow"] + 6:
+            return {"signal": "", "conds": {}, "followed": False}
+        r = evaluate(df, ctx)
+        followed = (side == "買い" and r["signal"] == "買い") or \
+                   (side == "売り" and r["signal"] == "売り")
+        return {
+            "signal": r["signal"],
+            "conds": {k: bool(v) for k, v in r["conds"].items()},
+            "followed": followed,
+        }
+    except Exception:
+        return {"signal": "", "conds": {}, "followed": False}
+
+
+def _close_session(market: str, style: str) -> dict:
+    sid = _active_session_id()
+    if not sid:
+        return {"trades": 0, "pnl": 0.0, "wins": 0, "losses": 0}
+
+    with _db_lock:
+        conn = _conn()
+        rows = conn.execute(
+            """SELECT pnl, result FROM trades
+               WHERE session_id=? AND market=? AND style=?""",
+            (sid, market, style),
+        ).fetchall()
+        conn.close()
+
+    pnls = [float(r["pnl"]) for r in rows]
+    wins = sum(1 for r in rows if r["result"] == "win")
+    losses = len(rows) - wins
+    total = sum(pnls)
+
+    tuning_note = ""
+    try:
+        import trade_analytics as ta
+        opt = ta.optimize_and_apply(market, style)
+        if opt.get("applied"):
+            tuning_note = "; ".join(opt.get("changes", []))
+    except ImportError:
+        pass
+
+    with _db_lock:
+        conn = _conn()
+        conn.execute(
+            """UPDATE daily_sessions SET
+               ended_at=?, trades_count=?, wins=?, losses=?,
+               total_pnl=?, tuning_applied=?
+               WHERE id=?""",
+            (datetime.now().strftime("%Y-%m-%d %H:%M"),
+             len(rows), wins, losses, total, tuning_note, sid),
+        )
+        conn.commit()
+        conn.close()
+
+    _set_setting("active_session_id", "")
+    return {"trades": len(rows), "pnl": total, "wins": wins, "losses": losses,
+            "tuning_note": tuning_note}
+
+
 def evaluate(df: pd.DataFrame, ctx: Ctx) -> dict:
     last, prev = df.iloc[-1], df.iloc[-2]
     price = float(last["Close"])
     s = ctx.s
+    params = _get_params(ctx)
+    min_score = params["min_score"]
+    vol_ratio = params["vol_surge_ratio"]
 
     cross_up = prev["ma_fast"] <= prev["ma_slow"] and last["ma_fast"] > last["ma_slow"]
     cross_dn = prev["ma_fast"] >= prev["ma_slow"] and last["ma_fast"] < last["ma_slow"]
@@ -258,8 +413,11 @@ def evaluate(df: pd.DataFrame, ctx: Ctx) -> dict:
         trend_label_up = f"長期MA({s['slow']})が上向き"
         trend_label_dn = f"長期MA({s['slow']})が下向き"
 
-    vol_surge = bool(last["Volume"] > s["vol_surge_ratio"] * last["vol_ma"]) \
+    vol_surge = bool(last["Volume"] > vol_ratio * last["vol_ma"]) \
         if pd.notna(last["vol_ma"]) else False
+    if params.get("require_volume") and not vol_surge:
+        cross_up = False
+        cross_dn = False
     rsi = float(last["rsi"]) if pd.notna(last["rsi"]) else 50.0
 
     ma_name = f"{s['ma_type'].upper()}{s['fast']}/{s['slow']}"
@@ -279,9 +437,9 @@ def evaluate(df: pd.DataFrame, ctx: Ctx) -> dict:
     long_score = sum(long_conds.values())
     short_score = sum(short_conds.values())
 
-    if cross_up and long_score >= COMMON["min_score"]:
+    if cross_up and long_score >= min_score:
         signal, conds = "買い", long_conds
-    elif cross_dn and short_score >= COMMON["min_score"]:
+    elif cross_dn and short_score >= min_score:
         signal, conds = "売り", short_conds
     else:
         signal = "様子見"
@@ -294,6 +452,7 @@ def evaluate(df: pd.DataFrame, ctx: Ctx) -> dict:
         "atr": float(last["atr"]),
         "time": last.name,
         "conds": conds,
+        "score": long_score if signal != "売り" else short_score,
     }
     if s["use_vwap"]:
         result["vwap"] = float(last["vwap"])
@@ -357,6 +516,12 @@ def _ctx(market: str, style: str) -> Ctx:
 
 def action_status(market: str = "jp", style: str = "day") -> dict:
     ctx = _ctx(market, style)
+    tuning = {}
+    try:
+        import trade_analytics as ta
+        tuning = ta.get_effective_params(market, style)
+    except ImportError:
+        pass
     return {
         "notify_enabled": notification_enabled(),
         "market": market,
@@ -367,6 +532,8 @@ def action_status(market: str = "jp", style: str = "day") -> dict:
         "interval": ctx.s["interval"],
         "markets": {k: v["name"] for k, v in MARKETS.items()},
         "styles": {k: v["name"] for k, v in STYLES.items()},
+        "tuning": tuning,
+        "session_active": _active_session_id() is not None,
     }
 
 
@@ -409,6 +576,10 @@ def action_scan(market: str = "jp", style: str = "day", tickers=None) -> dict:
             }
         results.append(item)
 
+        sid = _active_session_id()
+        if sid:
+            _log_signal(sid, market, style, code, r)
+
     return {
         "scanned_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
         "market": market,
@@ -418,18 +589,30 @@ def action_scan(market: str = "jp", style: str = "day", tickers=None) -> dict:
     }
 
 
-def action_start() -> dict:
+def action_start(market: str = "jp", style: str = "day") -> dict:
     set_notification_enabled(True)
+    _create_session(market, style)
     message = "取引を開始します"
     send_notification("Trade Start", message, force=True)
     return {"ok": True, "message": message, "notify_enabled": True}
 
 
-def action_end() -> dict:
+def action_end(market: str = "jp", style: str = "day") -> dict:
+    summary = _close_session(market, style)
     message = "終わります"
+    if summary["trades"]:
+        ctx = _ctx(market, style)
+        message += (
+            f"\n本日: {summary['trades']}回 "
+            f"勝{summary['wins']}敗{summary['losses']} "
+            f"損益{ctx.fmt_pnl(summary['pnl'])}"
+        )
+    if summary.get("tuning_note"):
+        message += f"\n精度調整: {summary['tuning_note']}"
     send_notification("Trade End", message, force=True)
     set_notification_enabled(False)
-    return {"ok": True, "message": message, "notify_enabled": False}
+    return {"ok": True, "message": message, "notify_enabled": False,
+            "daily_summary": summary}
 
 
 def action_notify_test() -> dict:
@@ -458,15 +641,21 @@ def action_buy(market: str, style: str, ticker: str, price: float, qty: int,
         except Exception:
             stop_val = target_val = None
 
+    snap = _snapshot_entry(ctx, ticker, side)
+    sid = _active_session_id()
+    conds_json = json.dumps(snap["conds"], ensure_ascii=False)
+
     with _db_lock:
         conn = _conn()
         conn.execute(
             """INSERT INTO positions
-               (market,style,ticker,side,entry_time,entry_price,qty,stop_loss,take_profit)
-               VALUES(?,?,?,?,?,?,?,?,?)""",
+               (market,style,ticker,side,entry_time,entry_price,qty,
+                stop_loss,take_profit,session_id,entry_conds_json,entry_signal)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
             (market, style, ticker, side,
              datetime.now().strftime("%Y-%m-%d %H:%M"),
-             price, qty, stop_val, target_val),
+             price, qty, stop_val, target_val,
+             sid, conds_json, snap["signal"]),
         )
         conn.commit()
         conn.close()
@@ -562,15 +751,24 @@ def action_sell(market: str, style: str, ticker: str, price: float) -> dict:
         sign = 1 if row["side"] == "買い" else -1
         pnl = (price - entry) * qty * sign
 
+        followed = 0
+        if row["entry_signal"] and row["side"]:
+            followed = int(
+                (row["side"] == "買い" and row["entry_signal"] == "買い") or
+                (row["side"] == "売り" and row["entry_signal"] == "売り")
+            )
         conn.execute(
             """INSERT INTO trades
                (market,style,ticker,side,entry_time,entry_price,qty,
-                stop_loss,take_profit,exit_time,exit_price,pnl,result)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                stop_loss,take_profit,exit_time,exit_price,pnl,result,
+                session_id,entry_conds_json,entry_signal,followed_signal)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (market, style, row["ticker"], row["side"], row["entry_time"],
              entry, qty, row["stop_loss"], row["take_profit"],
              datetime.now().strftime("%Y-%m-%d %H:%M"), price, pnl,
-             "win" if pnl > 0 else "loss"),
+             "win" if pnl > 0 else "loss",
+             row["session_id"], row["entry_conds_json"],
+             row["entry_signal"], followed),
         )
         conn.execute("DELETE FROM positions WHERE id=?", (row["id"],))
         conn.commit()
@@ -637,6 +835,27 @@ def action_review(market: str = "jp", style: str = "day") -> dict:
             for r in rows[-5:]
         ],
     }
+
+
+def action_validate(market: str = "jp", style: str = "day") -> dict:
+    try:
+        import trade_analytics as ta
+        return ta.analyze_performance(market, style)
+    except ImportError:
+        return {"ok": False, "error": "analytics module not found"}
+
+
+def action_journal(market: str = "jp", style: str = "day") -> dict:
+    with _db_lock:
+        conn = _conn()
+        rows = conn.execute(
+            """SELECT * FROM daily_sessions
+               WHERE market=? AND style=? ORDER BY id DESC LIMIT 30""",
+            (market, style),
+        ).fetchall()
+        conn.close()
+    sessions = [dict(r) for r in rows]
+    return {"ok": True, "sessions": sessions, "market": market, "style": style}
 
 
 def action_monitor_all() -> dict:
