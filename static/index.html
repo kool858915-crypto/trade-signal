@@ -58,6 +58,14 @@ nav button span{display:block;font-size:18px;margin-bottom:2px}
 .sell-row{display:flex;gap:8px;margin-top:10px}
 .sell-row input{flex:1}
 .sell-row .btn{width:auto;padding:12px 14px;margin:0;white-space:nowrap}
+.filter-row{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px}
+.filter-row select,.filter-row input{flex:1;min-width:72px;padding:8px;font-size:13px}
+.hist-row{border-bottom:1px solid var(--border);padding:10px 0;cursor:pointer}
+.hist-row:last-child{border:none}
+.hist-head{display:flex;justify-content:space-between;align-items:center;gap:8px}
+.hist-detail{display:none;margin-top:8px;padding:8px;background:#0b1220;border-radius:8px;font-size:12px}
+.hist-row.open .hist-detail{display:block}
+.badge-demo{font-size:10px;background:#422006;color:#fcd34d;padding:2px 6px;border-radius:4px;margin-left:4px}
 </style>
 </head>
 <body>
@@ -150,10 +158,33 @@ nav button span{display:block;font-size:18px;margin-bottom:2px}
     </div>
     <div id="signal-lag-content"></div>
   </section>
+  <section class="panel" id="panel-history">
+    <div class="card">
+      <h2>シグナル履歴</h2>
+      <p class="hint">通知の根拠を確認できます。タップで条件内訳を展開。</p>
+      <div class="filter-row">
+        <input id="hist-ticker" type="text" placeholder="銘柄" list="watchlist">
+        <select id="hist-signal">
+          <option value="">買い+売り</option>
+          <option value="買い">買い</option>
+          <option value="売り">売り</option>
+          <option value="all">全て</option>
+        </select>
+        <select id="hist-days">
+          <option value="7">7日</option>
+          <option value="30">30日</option>
+          <option value="0">全期間</option>
+        </select>
+      </div>
+      <button class="btn btn-secondary" onclick="loadSignalHistory()">更新</button>
+    </div>
+    <div id="history-list"><div class="empty">履歴がありません</div></div>
+  </section>
 </main>
 <nav>
   <button class="active" data-panel="home" onclick="showPanel('home')"><span>🏠</span>ホーム</button>
   <button data-panel="scan" onclick="showPanel('scan')"><span>📊</span>スキャン</button>
+  <button data-panel="history" onclick="showPanel('history')"><span>🕐</span>履歴</button>
   <button data-panel="positions" onclick="showPanel('positions')"><span>📋</span>建玉</button>
   <button data-panel="entry" onclick="showPanel('entry')"><span>✏️</span>記録</button>
   <button data-panel="review" onclick="showPanel('review')"><span>📈</span>成績</button>
@@ -176,7 +207,7 @@ function login(){pin=document.getElementById('pin-input').value;if(!pin)return;l
 function onContextChange(){market=document.getElementById('sel-market').value;style=document.getElementById('sel-style').value;localStorage.setItem(CTX_KEY,JSON.stringify({market,style}));refreshStatus();loadRecommend();}
 async function api(path,opts={}){const sep=path.includes('?')?'&':'?';const url=path.startsWith('/api/')?path+sep+ctxQs():path;const h={'X-Pin':pin,...opts.headers||{}};if(opts.body)h['Content-Type']='application/json';const r=await fetch(url,{...opts,headers:h});if(r.status===401){localStorage.removeItem(PIN_KEY);location.reload();return null;}return r.json();}
 async function apiPost(path,body){const d=await api(path,{method:'POST',body:body?JSON.stringify(body):undefined});if(!d)return;if(d.message)toast(d.message);if(d.error)toast(d.error);refreshStatus();return d;}
-function showPanel(n){document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));document.getElementById('panel-'+n).classList.add('active');document.querySelectorAll('nav button').forEach(b=>b.classList.toggle('active',b.dataset.panel===n));if(n==='review'){loadReview();loadJournal();loadSignalLag();}}
+function showPanel(n){document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));document.getElementById('panel-'+n).classList.add('active');document.querySelectorAll('nav button').forEach(b=>b.classList.toggle('active',b.dataset.panel===n));if(n==='review'){loadReview();loadJournal();loadSignalLag();}if(n==='history')loadSignalHistory();}
 function goScan(){showPanel('scan');runScan();}
 function goPositions(){showPanel('positions');loadPositions();}
 function sigCls(s){return s==='買い'?'signal-buy':s==='売り'?'signal-sell':'signal-wait';}
@@ -394,6 +425,41 @@ async function loadSignalLag(){
   }
   if(!h)h='<div class="empty">まだ記録がありません（デモ取引で買いシグナル時に自動記録）</div>';
   el.innerHTML=h;
+}
+function crossLabel(c){return c==='golden'?'ゴールデンクロス':c==='dead'?'デッドクロス':'なし';}
+async function loadSignalHistory(){
+  const el=document.getElementById('history-list');
+  el.innerHTML='<div class="loading">読み込み中...</div>';
+  const ticker=document.getElementById('hist-ticker').value.trim();
+  const sigSel=document.getElementById('hist-signal').value;
+  const days=document.getElementById('hist-days').value;
+  let qs='limit=50';
+  if(ticker)qs+=`&ticker=${encodeURIComponent(ticker)}`;
+  if(sigSel==='買い'||sigSel==='売り')qs+=`&signal=${encodeURIComponent(sigSel)}`;
+  if(sigSel==='all')qs+='&all=1';
+  if(days&&days!=='0')qs+=`&days=${days}`;
+  const d=await api('/api/signal_history?'+qs);if(!d)return;
+  if(!d.items||!d.items.length){el.innerHTML='<div class="empty">履歴がありません</div>';return;}
+  el.innerHTML=d.items.map((it,i)=>{
+    const demo=it.demo_entered?'<span class="badge-demo">デモIN済</span>':'';
+    const c=it.conditions||{};
+    let detail=`<div class="cond">ルール: ${c.rule||'–'} / クロス: ${crossLabel(c.cross)}</div>`;
+    detail+=`<div class="cond">RSI ${(c.rsi??it.rsi??0).toFixed? (c.rsi??it.rsi).toFixed(1):it.rsi} / 出来高 ${c.vol_ratio!=null?c.vol_ratio+'倍':'–'} / スコア ${c.score??it.score??'–'}</div>`;
+    if(c.min_score!=null)detail+=`<div class="cond">必要スコア: ${c.min_score}</div>`;
+    if(it.conds&&Object.keys(it.conds).length){
+      detail+='<div style="margin-top:6px">';
+      Object.entries(it.conds).forEach(([k,v])=>{detail+=`<div class="cond">${v?'○':'×'} ${k}</div>`;});
+      detail+='</div>';
+    }
+    return `<div class="hist-row" onclick="this.classList.toggle('open')">
+      <div class="hist-head">
+        <div><b>${it.ticker}</b> <span class="${sigCls(it.signal)}">${it.signal}</span>${demo}</div>
+        <span class="cond">${it.logged_at}</span>
+      </div>
+      <div class="cond">現値 ${(it.price||0).toLocaleString()}</div>
+      <div class="hist-detail">${detail}</div>
+    </div>`;
+  }).join('');
 }
 async function loadJournal(){
   const el=document.getElementById('journal-content');

@@ -150,6 +150,17 @@ class AppHandler(BaseHTTPRequestHandler):
                 _json_response(self, tnews.get_news_context(market, force_refresh=refresh))
             except Exception as e:
                 _json_response(self, {"error": str(e)}, 500)
+        elif path == "/api/signal_history":
+            limit = int(qs.get("limit", "50"))
+            ticker = qs.get("ticker") or None
+            signal = qs.get("signal") or None
+            days_raw = qs.get("days")
+            days = int(days_raw) if days_raw else None
+            include_wait = qs.get("all") in ("1", "true")
+            _json_response(self, tc.action_signal_history(
+                market, style, limit=limit, ticker=ticker,
+                signal=signal, days=days, include_wait=include_wait,
+            ))
         else:
             _json_response(self, {"error": "not found"}, 404)
 

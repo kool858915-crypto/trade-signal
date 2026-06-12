@@ -6,7 +6,7 @@ import json
 import os
 import sqlite3
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -185,6 +185,8 @@ def _migrate_columns(conn):
         ("positions", "is_demo", "INTEGER DEFAULT 0"),
         ("trades", "is_demo", "INTEGER DEFAULT 0"),
         ("trades", "exit_reason", "TEXT"),
+        ("signal_logs", "conditions_json", "TEXT"),
+        ("signal_logs", "demo_position_id", "INTEGER"),
     ]
     for table, col, typ in migrations:
         cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
@@ -383,19 +385,55 @@ def _create_session(market: str, style: str) -> int:
     return sid
 
 
-def _log_signal(session_id, market, style, ticker, r: dict):
+def _build_conditions_json(ctx: Ctx, r: dict) -> str:
+    s = ctx.s
+    rule = f"{s['ma_type'].upper()}{s['fast']}/{s['slow']}"
+    detail = {
+        "rule": rule,
+        "rsi": round(float(r.get("rsi", 0)), 1),
+        "vol_ratio": round(float(r.get("vol_ratio", 0)), 2),
+        "cross": r.get("cross", "none"),
+        "score": int(r.get("score", 0)),
+        "min_score": _get_params(ctx)["min_score"],
+        "signal": r.get("signal"),
+    }
+    if "vwap" in r:
+        detail["vwap"] = round(float(r["vwap"]), 2)
+    if "atr" in r:
+        detail["atr"] = round(float(r["atr"]), 2)
+    return json.dumps(detail, ensure_ascii=False)
+
+
+def _log_signal(session_id, market, style, ticker, r: dict,
+                ctx: Ctx | None = None) -> int | None:
     conds_json = json.dumps({k: bool(v) for k, v in r["conds"].items()}, ensure_ascii=False)
+    conditions_json = _build_conditions_json(ctx or _ctx(market, style), r)
     with _db_lock:
         conn = _conn()
-        conn.execute(
+        cur = conn.execute(
             """INSERT INTO signal_logs
                (session_id, market, style, logged_at, ticker, signal,
-                price, rsi, score, conds_json)
-               VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                price, rsi, score, conds_json, conditions_json)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
             (session_id, market, style,
              datetime.now().strftime("%Y-%m-%d %H:%M"),
              ticker, r["signal"], r["price"], r["rsi"],
-             r.get("score", 0), conds_json),
+             int(r.get("score", 0)), conds_json, conditions_json),
+        )
+        log_id = cur.lastrowid
+        conn.commit()
+        conn.close()
+    return log_id
+
+
+def _link_signal_demo(log_id: int | None, position_id: int | None):
+    if not log_id or not position_id:
+        return
+    with _db_lock:
+        conn = _conn()
+        conn.execute(
+            "UPDATE signal_logs SET demo_position_id=? WHERE id=?",
+            (position_id, log_id),
         )
         conn.commit()
         conn.close()
@@ -486,8 +524,9 @@ def evaluate(df: pd.DataFrame, ctx: Ctx) -> dict:
         trend_label_up = f"長期MA({s['slow']})が上向き"
         trend_label_dn = f"長期MA({s['slow']})が下向き"
 
-    vol_surge = bool(last["Volume"] > vol_ratio * last["vol_ma"]) \
-        if pd.notna(last["vol_ma"]) else False
+    vol_ma = float(last["vol_ma"]) if pd.notna(last["vol_ma"]) else 0.0
+    vol_ratio_num = float(last["Volume"] / vol_ma) if vol_ma > 0 else 0.0
+    vol_surge = vol_ratio_num > vol_ratio if vol_ma > 0 else False
     if params.get("require_volume") and not vol_surge:
         cross_up = False
         cross_dn = False
@@ -518,6 +557,7 @@ def evaluate(df: pd.DataFrame, ctx: Ctx) -> dict:
         signal = "様子見"
         conds = long_conds if long_score >= short_score else short_conds
 
+    cross_type = "golden" if cross_up else ("dead" if cross_dn else "none")
     result = {
         "signal": signal,
         "price": price,
@@ -526,6 +566,8 @@ def evaluate(df: pd.DataFrame, ctx: Ctx) -> dict:
         "time": last.name,
         "conds": conds,
         "score": long_score if signal != "売り" else short_score,
+        "vol_ratio": vol_ratio_num,
+        "cross": cross_type,
     }
     if s["use_vwap"]:
         result["vwap"] = float(last["vwap"])
@@ -664,6 +706,7 @@ def action_scan(market: str = "jp", style: str = "day", tickers=None) -> dict:
     ctx = _ctx(market, style)
     tickers = tickers or get_scan_tickers(market, style)
     results = []
+    signal_log_ids: dict[str, int] = {}
 
     for code in tickers:
         item = {"ticker": code}
@@ -701,10 +744,12 @@ def action_scan(market: str = "jp", style: str = "day", tickers=None) -> dict:
 
         sid = _recording_session_id()
         if sid:
-            _log_signal(sid, market, style, code, r)
+            log_id = _log_signal(sid, market, style, code, r, ctx)
+            if log_id:
+                signal_log_ids[str(code).upper()] = log_id
 
     _notify_new_signals(market, style, results)
-    demo_entries = _process_demo_entries(market, style, results)
+    demo_entries = _process_demo_entries(market, style, results, signal_log_ids)
     if market == "jp" and demo_mode_enabled():
         _record_signal_lag_on_scan(results)
     return {
@@ -731,10 +776,12 @@ def _record_signal_lag_on_scan(results: list):
         pass
 
 
-def _process_demo_entries(market: str, style: str, results: list) -> list:
+def _process_demo_entries(market: str, style: str, results: list,
+                          signal_log_ids: dict[str, int] | None = None) -> list:
     """シグナル検出時にデモ建玉を自動作成"""
     if not demo_mode_enabled():
         return []
+    signal_log_ids = signal_log_ids or {}
     entries = []
     for item in results:
         if item.get("signal") not in ("買い", "売り") or "plan" not in item:
@@ -745,6 +792,7 @@ def _process_demo_entries(market: str, style: str, results: list) -> list:
         entered = _demo_open_position(
             market, style, ticker, item["signal"],
             item["price"], item["plan"], item.get("conds", []),
+            signal_log_id=signal_log_ids.get(ticker),
         )
         if entered:
             entries.append(entered)
@@ -752,7 +800,8 @@ def _process_demo_entries(market: str, style: str, results: list) -> list:
 
 
 def _demo_open_position(market: str, style: str, ticker: str, side: str,
-                        price: float, plan: dict, conds: list) -> dict | None:
+                        price: float, plan: dict, conds: list,
+                        signal_log_id: int | None = None) -> dict | None:
     ctx = _ctx(market, style)
     qty = plan.get("qty") or ctx.m["unit"]
     if qty <= 0:
@@ -764,7 +813,7 @@ def _demo_open_position(market: str, style: str, ticker: str, side: str,
 
     with _db_lock:
         conn = _conn()
-        conn.execute(
+        cur = conn.execute(
             """INSERT INTO positions
                (market,style,ticker,side,entry_time,entry_price,qty,
                 stop_loss,take_profit,session_id,entry_conds_json,
@@ -775,8 +824,11 @@ def _demo_open_position(market: str, style: str, ticker: str, side: str,
              price, qty, stop_val, target_val,
              sid, conds_json, side),
         )
+        position_id = cur.lastrowid
         conn.commit()
         conn.close()
+
+    _link_signal_demo(signal_log_id, position_id)
 
     lines = [f"[デモ] {ticker} {side}", f"価格: {ctx.fmt(price)}", f"数量: {qty}"]
     if stop_val:
@@ -1212,6 +1264,80 @@ def action_journal(market: str = "jp", style: str = "day") -> dict:
         conn.close()
     sessions = [dict(r) for r in rows]
     return {"ok": True, "sessions": sessions, "market": market, "style": style}
+
+
+def action_signal_history(market: str = "jp", style: str = "day",
+                          limit: int = 50, ticker: str | None = None,
+                          signal: str | None = None, days: int | None = None,
+                          include_wait: bool = False) -> dict:
+    """シグナル履歴を返す（デフォルトは買い/売りのみ）"""
+    limit = max(1, min(int(limit), 200))
+    clauses = ["market=?", "style=?"]
+    params: list = [market, style]
+
+    if ticker:
+        clauses.append("ticker=?")
+        params.append(ticker.strip().upper())
+    if signal in ("買い", "売り"):
+        clauses.append("signal=?")
+        params.append(signal)
+    elif not include_wait:
+        clauses.append("signal IN ('買い','売り')")
+    if days is not None and int(days) > 0:
+        start = (datetime.now() - timedelta(days=int(days))).strftime("%Y-%m-%d")
+        clauses.append("logged_at >= ?")
+        params.append(start + " 00:00")
+
+    where = " AND ".join(clauses)
+    params.append(limit)
+
+    with _db_lock:
+        conn = _conn()
+        rows = conn.execute(
+            f"""SELECT id, session_id, logged_at, ticker, signal,
+                       price, rsi, score, conds_json, conditions_json,
+                       demo_position_id
+                FROM signal_logs
+                WHERE {where}
+                ORDER BY id DESC
+                LIMIT ?""",
+            params,
+        ).fetchall()
+        conn.close()
+
+    items = []
+    for row in rows:
+        conds = {}
+        try:
+            conds = json.loads(row["conds_json"] or "{}")
+        except json.JSONDecodeError:
+            pass
+        conditions = {}
+        try:
+            conditions = json.loads(row["conditions_json"] or "{}")
+        except json.JSONDecodeError:
+            pass
+        items.append({
+            "id": row["id"],
+            "logged_at": row["logged_at"],
+            "ticker": row["ticker"],
+            "signal": row["signal"],
+            "price": row["price"],
+            "rsi": row["rsi"],
+            "score": row["score"],
+            "conds": conds,
+            "conditions": conditions,
+            "demo_entered": row["demo_position_id"] is not None,
+            "demo_position_id": row["demo_position_id"],
+        })
+
+    return {
+        "ok": True,
+        "market": market,
+        "style": style,
+        "count": len(items),
+        "items": items,
+    }
 
 
 def action_monitor_all() -> dict:
