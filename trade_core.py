@@ -634,27 +634,45 @@ def _notify_new_signals(market: str, style: str, results: list):
         if item.get("plan"):
             p = item["plan"]
             lines.append(f"損切り: {ctx.fmt(p['stop'])} / 利確: {ctx.fmt(p['target'])}")
-        send_notification(f"Signal {sig}", "\n".join(lines))
+        prio = "default"
+        try:
+            import market_hours as mh
+            if mh.notify_priority_boost(market):
+                prio = "urgent"
+        except ImportError:
+            pass
+        prio_override = "4" if prio == "urgent" else None
+        send_notification(
+            f"Signal {sig}", "\n".join(lines),
+            kind="production_signal", priority_override=prio_override,
+        )
 
     _set_setting(key, json.dumps(new_state, ensure_ascii=False))
 
 
 def send_notification(title: str, message: str, force: bool = False,
-                      priority: str = "default") -> bool:
-    if not force and not notification_enabled():
-        return False
-
-    topic = CONFIG["ntfy_topic"]
-    if not topic:
-        return False
-
-    safe_title = title.encode("ascii", "ignore").decode() or "Trade Alert"
-    headers = {"Title": safe_title, "Tags": "chart_with_upwards_trend"}
-    if priority == "urgent":
-        headers["Priority"] = "urgent"
-
-    server = CONFIG["ntfy_server"].rstrip("/")
-    return _http_post(f"{server}/{topic}", message.encode("utf-8"), headers)
+                      priority: str = "default", kind: str = "session",
+                      priority_override: str | None = None) -> bool:
+    if priority == "urgent" and not priority_override:
+        priority_override = "4"
+    try:
+        import notifier as nf
+        return nf.notify(
+            kind, title, message, force=force,
+            priority_override=priority_override,
+        )
+    except ImportError:
+        if not force and not notification_enabled():
+            return False
+        topic = CONFIG["ntfy_topic"]
+        if not topic:
+            return False
+        safe_title = title.encode("ascii", "ignore").decode() or "Trade Alert"
+        headers = {"Title": safe_title, "Tags": "chart_with_upwards_trend"}
+        if priority == "urgent":
+            headers["Priority"] = "urgent"
+        server = CONFIG["ntfy_server"].rstrip("/")
+        return _http_post(f"{server}/{topic}", message.encode("utf-8"), headers)
 
 
 # ============================================================
@@ -835,7 +853,7 @@ def _demo_open_position(market: str, style: str, ticker: str, side: str,
         lines.append(f"損切り: {ctx.fmt(stop_val)}")
     if target_val:
         lines.append(f"利確: {ctx.fmt(target_val)}")
-    send_notification("Demo Entry", "\n".join(lines))
+    send_notification("Demo Entry", "\n".join(lines), kind="demo_entry")
     return {"ticker": ticker, "side": side, "price": price, "qty": qty}
 
 
@@ -877,15 +895,21 @@ def _close_position_row(row, exit_price: float, reason: str = "manual",
         conn.close()
 
     if notify:
-        prefix = "[デモ] " if is_demo else ""
+        if reason == "損切り":
+            nkind = "stop_executed"
+        elif is_demo:
+            nkind = "demo_exit"
+        else:
+            nkind = "exit"
         send_notification(
             "Demo Exit" if is_demo else "Exit",
             "\n".join([
-                f"{prefix}{row['ticker']} {row['side']} ({reason})",
+                f"{row['ticker']} {row['side']} ({reason})",
                 f"エントリー: {ctx.fmt(entry)}",
                 f"決済: {ctx.fmt(exit_price)}",
                 f"損益: {ctx.fmt_pnl(pnl)}",
             ]),
+            kind=nkind,
         )
     return {"ok": True, "ticker": row["ticker"], "pnl": pnl, "qty": qty,
             "is_demo": bool(is_demo), "reason": reason}
@@ -995,7 +1019,7 @@ def action_start(market: str = "jp", style: str = "day", demo: bool = True,
         except Exception:
             pass
 
-    send_notification("Session Start", message, force=True)
+    send_notification("Session Start", message, force=True, kind="session")
     action_scan(market, style, scan_tickers)
     return {
         "ok": True, "message": message, "notify_enabled": True,
@@ -1019,7 +1043,7 @@ def action_end(market: str = "jp", style: str = "day") -> dict:
         )
     if summary.get("tuning_note"):
         message += f"\n精度調整: {summary['tuning_note']}"
-    send_notification("Session End", message, force=True)
+    send_notification("Session End", message, force=True, kind="session")
     return {
         "ok": True, "message": message,
         "notify_enabled": notification_enabled(),
@@ -1030,11 +1054,14 @@ def action_end(market: str = "jp", style: str = "day") -> dict:
 
 
 def action_notify_test() -> dict:
-    ok = send_notification(
-        "Test",
-        "trade app からのテスト通知です",
-        force=True,
-    )
+    try:
+        import notifier as nf
+        ok = nf.notify_test("test")
+    except ImportError:
+        ok = send_notification(
+            "Test", "trade app からのテスト通知です",
+            force=True, kind="test",
+        )
     return {"ok": ok, "message": "通知を送信しました" if ok else "通知失敗"}
 
 
@@ -1080,7 +1107,7 @@ def action_buy(market: str, style: str, ticker: str, price: float, qty: int,
         msg.append(f"損切り: {ctx.fmt(stop_val)}")
     if target_val:
         msg.append(f"利確: {ctx.fmt(target_val)}")
-    send_notification("Entry", "\n".join(msg))
+    send_notification("Entry", "\n".join(msg), kind="entry")
 
     return {"ok": True, "ticker": ticker, "side": side, "qty": qty,
             "stop_loss": stop_val, "take_profit": target_val}
@@ -1121,7 +1148,7 @@ def _check_position_row(row, ctx: Ctx, notify: bool = True) -> dict:
                             f"数量: {qty}株", f"現値: {ctx.fmt(cur)}",
                             f"損切り: {ctx.fmt(stop)}", f"含み損益: {ctx.fmt_pnl(pnl)}",
                         ]),
-                        priority="urgent",
+                        kind="stop_warning", priority_override="4",
                     )
                     with _db_lock:
                         conn = _conn()
@@ -1172,6 +1199,114 @@ def action_sell(market: str, style: str, ticker: str, price: float) -> dict:
     return result
 
 
+def _max_drawdown(pnls: list[float]) -> float:
+    """累積損益系列の最大ドローダウン（正の値で返す）"""
+    if not pnls:
+        return 0.0
+    peak = 0.0
+    cumulative = 0.0
+    max_dd = 0.0
+    for p in pnls:
+        cumulative += p
+        if cumulative > peak:
+            peak = cumulative
+        dd = peak - cumulative
+        if dd > max_dd:
+            max_dd = dd
+    return max_dd
+
+
+def _trade_stats(rows) -> dict | None:
+    if not rows:
+        return None
+    pnls = [float(r["pnl"]) for r in rows]
+    wins = [p for p in pnls if p > 0]
+    losses = [p for p in pnls if p <= 0]
+    total = sum(pnls)
+    gross_win = sum(wins)
+    gross_loss = abs(sum(losses))
+    ordered = sorted(rows, key=lambda r: (r["exit_time"] or "", r["id"]))
+    return {
+        "count": len(pnls),
+        "total_pnl": total,
+        "win_rate": len(wins) / len(pnls) * 100,
+        "wins": len(wins),
+        "losses": len(losses),
+        "expectancy": total / len(pnls),
+        "avg_win": gross_win / len(wins) if wins else None,
+        "avg_loss": gross_loss / len(losses) if losses else None,
+        "profit_factor": gross_win / gross_loss if gross_loss > 0 else None,
+        "max_drawdown": _max_drawdown([float(r["pnl"]) for r in ordered]),
+    }
+
+
+def _signal_follow_stats(market: str, style: str, real_rows: list) -> dict:
+    """シグナル通知に対する手動追随の統計"""
+    with _db_lock:
+        conn = _conn()
+        sig_rows = conn.execute(
+            """SELECT COUNT(*) AS cnt FROM signal_logs
+               WHERE market=? AND style=? AND signal IN ('買い','売り')""",
+            (market, style),
+        ).fetchone()
+        conn.close()
+    signal_count = int(sig_rows["cnt"]) if sig_rows else 0
+    followed = [r for r in real_rows if int(r["followed_signal"] or 0)]
+    follow_stats = _trade_stats(followed)
+    manual_count = len(real_rows)
+    return {
+        "signal_count": signal_count,
+        "manual_trades": manual_count,
+        "followed_trades": len(followed),
+        "follow_rate": (len(followed) / signal_count * 100)
+        if signal_count > 0 else None,
+        "followed_performance": follow_stats,
+    }
+
+
+def action_performance(market: str = "jp", style: str = "day",
+                       mode: str = "all") -> dict:
+    """mode: all | demo | manual"""
+    ctx = _ctx(market, style)
+    mode = (mode or "all").lower()
+    if mode not in ("all", "demo", "manual"):
+        mode = "all"
+
+    with _db_lock:
+        conn = _conn()
+        rows = conn.execute(
+            "SELECT * FROM trades WHERE market=? AND style=? ORDER BY id",
+            (market, style),
+        ).fetchall()
+        conn.close()
+
+    demo_rows = [r for r in rows if r["is_demo"]]
+    real_rows = [r for r in rows if not r["is_demo"]]
+
+    result = {
+        "ok": True,
+        "market": market,
+        "style": style,
+        "currency": ctx.m["currency"],
+        "mode": mode,
+    }
+
+    if mode == "demo":
+        result["stats"] = _trade_stats(demo_rows)
+    elif mode == "manual":
+        result["stats"] = _trade_stats(real_rows)
+        result["signal_follow"] = _signal_follow_stats(market, style, real_rows)
+    else:
+        result["stats"] = _trade_stats(rows)
+        result["demo"] = _trade_stats(demo_rows)
+        result["manual"] = _trade_stats(real_rows)
+        result["signal_follow"] = _signal_follow_stats(market, style, real_rows)
+
+    if not rows:
+        result["message"] = "決済済みトレードがまだありません"
+    return result
+
+
 def action_review(market: str = "jp", style: str = "day") -> dict:
     ctx = _ctx(market, style)
     with _db_lock:
@@ -1190,26 +1325,7 @@ def action_review(market: str = "jp", style: str = "day") -> dict:
     demo_rows = [r for r in rows if r["is_demo"]]
     real_rows = [r for r in rows if not r["is_demo"]]
 
-    def _stats(subset):
-        if not subset:
-            return None
-        pnls = [float(r["pnl"]) for r in subset]
-        wins = [p for p in pnls if p > 0]
-        losses = [p for p in pnls if p <= 0]
-        total = sum(pnls)
-        gross_win = sum(wins)
-        gross_loss = abs(sum(losses))
-        return {
-            "count": len(pnls),
-            "total_pnl": total,
-            "win_rate": len(wins) / len(pnls) * 100,
-            "wins": len(wins),
-            "losses": len(losses),
-            "expectancy": total / len(pnls),
-            "profit_factor": gross_win / gross_loss if gross_loss > 0 else None,
-        }
-
-    all_stats = _stats(rows)
+    all_stats = _trade_stats(rows)
     by_ticker = {}
     for r in rows:
         by_ticker.setdefault(r["ticker"], []).append(float(r["pnl"]))
@@ -1227,8 +1343,9 @@ def action_review(market: str = "jp", style: str = "day") -> dict:
                      all_stats["losses"]) if all_stats["losses"] else None,
         "profit_factor": all_stats["profit_factor"],
         "expectancy": all_stats["expectancy"],
-        "demo_stats": _stats(demo_rows),
-        "real_stats": _stats(real_rows),
+        "demo_stats": _trade_stats(demo_rows),
+        "real_stats": _trade_stats(real_rows),
+        "signal_follow": _signal_follow_stats(market, style, real_rows),
         "currency": ctx.m["currency"],
         "market": market,
         "style": style,
@@ -1342,6 +1459,21 @@ def action_signal_history(market: str = "jp", style: str = "day",
 
 def action_monitor_all() -> dict:
     """損切り監視 + デモ常時スキャン・決済 + 本番通知"""
+    market, style = _session_context()
+    try:
+        import market_hours as mh
+        if not mh.should_scan(market):
+            return {
+                "ok": True, "skipped": "market_closed",
+                "market": market, "phase": mh.market_phase(market),
+                "checked": 0, "alerts": 0,
+                "demo_closed": 0, "demo_entries": 0,
+                "notify_enabled": notification_enabled(),
+                "demo_mode": demo_mode_enabled(),
+            }
+    except ImportError:
+        pass
+
     demo_closed = []
     demo_entries = []
     if demo_mode_enabled():

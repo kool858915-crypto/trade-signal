@@ -66,6 +66,12 @@ nav button span{display:block;font-size:18px;margin-bottom:2px}
 .hist-detail{display:none;margin-top:8px;padding:8px;background:#0b1220;border-radius:8px;font-size:12px}
 .hist-row.open .hist-detail{display:block}
 .badge-demo{font-size:10px;background:#422006;color:#fcd34d;padding:2px 6px;border-radius:4px;margin-left:4px}
+.mode-tabs{display:flex;gap:6px;margin-bottom:12px}
+.mode-tabs button{flex:1;padding:10px 6px;border:1px solid var(--border);border-radius:8px;background:#0b1220;color:var(--muted);font-size:12px;font-weight:600;cursor:pointer}
+.mode-tabs button.active{background:#1e3a5f;color:#93c5fd;border-color:#3b82f6}
+.compare-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px}
+.compare-col{background:#0b1220;border-radius:8px;padding:10px;font-size:12px}
+.compare-col h3{font-size:12px;color:var(--muted);margin-bottom:6px}
 </style>
 </head>
 <body>
@@ -142,7 +148,15 @@ nav button span{display:block;font-size:18px;margin-bottom:2px}
     </div>
   </section>
   <section class="panel" id="panel-review">
-    <button class="btn btn-secondary" onclick="loadReview()">更新</button>
+    <div class="card">
+      <h2>成績</h2>
+      <div class="mode-tabs">
+        <button class="active" data-mode="compare" onclick="setPerfMode('compare')">比較</button>
+        <button data-mode="demo" onclick="setPerfMode('demo')">デモ</button>
+        <button data-mode="manual" onclick="setPerfMode('manual')">手動</button>
+      </div>
+      <button class="btn btn-secondary" onclick="loadReview()">更新</button>
+    </div>
     <div id="review-content"><div class="empty">成績データがありません</div></div>
     <div class="card" style="margin-top:12px">
       <h2>検証・精度改善</h2>
@@ -207,6 +221,8 @@ function login(){pin=document.getElementById('pin-input').value;if(!pin)return;l
 function onContextChange(){market=document.getElementById('sel-market').value;style=document.getElementById('sel-style').value;localStorage.setItem(CTX_KEY,JSON.stringify({market,style}));refreshStatus();loadRecommend();}
 async function api(path,opts={}){const sep=path.includes('?')?'&':'?';const url=path.startsWith('/api/')?path+sep+ctxQs():path;const h={'X-Pin':pin,...opts.headers||{}};if(opts.body)h['Content-Type']='application/json';const r=await fetch(url,{...opts,headers:h});if(r.status===401){localStorage.removeItem(PIN_KEY);location.reload();return null;}return r.json();}
 async function apiPost(path,body){const d=await api(path,{method:'POST',body:body?JSON.stringify(body):undefined});if(!d)return;if(d.message)toast(d.message);if(d.error)toast(d.error);refreshStatus();return d;}
+let perfMode='compare';
+function setPerfMode(m){perfMode=m;document.querySelectorAll('.mode-tabs button').forEach(b=>b.classList.toggle('active',b.dataset.mode===m));loadReview();}
 function showPanel(n){document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));document.getElementById('panel-'+n).classList.add('active');document.querySelectorAll('nav button').forEach(b=>b.classList.toggle('active',b.dataset.panel===n));if(n==='review'){loadReview();loadJournal();loadSignalLag();}if(n==='history')loadSignalHistory();}
 function goScan(){showPanel('scan');runScan();}
 function goPositions(){showPanel('positions');loadPositions();}
@@ -348,24 +364,64 @@ async function submitSell(t){
   const d=await apiPost('/api/sell',{ticker:t,price:p});
   if(d&&d.ok){toast(`${t} 決済 ${fmtPnl(d.pnl,d.currency||'円')}`);loadPositions();}
 }
+function fmtPct(v){return v==null?'–':v.toFixed(1)+'%';}
+function fmtPf(v){return v==null?'–':v.toFixed(2);}
+function renderPerfStats(s,c,title){
+  if(!s||!s.count)return `<div class="empty">${title||''}データなし</div>`;
+  return `<div class="card">${title?`<h2>${title}</h2>`:''}
+    <div class="stat"><span>取引数</span><span>${s.count}回</span></div>
+    <div class="stat"><span>合計損益</span><b class="${s.total_pnl>=0?'pnl-pos':'pnl-neg'}">${fmtPnl(s.total_pnl,c)}</b></div>
+    <div class="stat"><span>勝率</span><span>${s.win_rate.toFixed(1)}% (${s.wins}勝${s.losses}敗)</span></div>
+    <div class="stat"><span>平均利益</span><span class="pnl-pos">${s.avg_win!=null?fmtPnl(s.avg_win,c):'–'}</span></div>
+    <div class="stat"><span>平均損失</span><span class="pnl-neg">${s.avg_loss!=null?fmtPnl(-s.avg_loss,c):'–'}</span></div>
+    <div class="stat"><span>PF</span><span>${fmtPf(s.profit_factor)}</span></div>
+    <div class="stat"><span>最大DD</span><span class="pnl-neg">${fmtPnl(-(s.max_drawdown||0),c)}</span></div>
+    <div class="stat"><span>期待値</span><span>${fmtPnl(s.expectancy,c)}</span></div></div>`;
+}
+function renderFollow(sf,c){
+  if(!sf||!sf.signal_count)return '';
+  let h='<div class="card"><h2>シグナル追随</h2>';
+  h+=`<div class="stat"><span>シグナル数</span><span>${sf.signal_count}件</span></div>`;
+  h+=`<div class="stat"><span>手動エントリー</span><span>${sf.manual_trades}件</span></div>`;
+  h+=`<div class="stat"><span>追随率</span><span>${fmtPct(sf.follow_rate)}</span></div>`;
+  if(sf.followed_performance&&sf.followed_performance.count){
+    const fp=sf.followed_performance;
+    h+=`<div class="stat"><span>追随時勝率</span><span>${fp.win_rate.toFixed(1)}%</span></div>`;
+    h+=`<div class="stat"><span>追随時損益</span><span class="${fp.total_pnl>=0?'pnl-pos':'pnl-neg'}">${fmtPnl(fp.total_pnl,c)}</span></div>`;
+  }
+  return h+'</div>';
+}
 async function loadReview(){
   const el=document.getElementById('review-content');
   el.innerHTML='<div class="loading">読み込み中...</div>';
-  const d=await api('/api/review');if(!d)return;
-  if(!d.count){el.innerHTML='<div class="empty">決済済みトレードなし</div>';return;}
+  const mode=perfMode==='compare'?'all':perfMode;
+  const d=await api('/api/performance?mode='+mode);if(!d)return;
   const c=d.currency||'円';
-  let h=`<div class="card">
-    <div class="stat"><span>合計損益</span><b class="${d.total_pnl>=0?'pnl-pos':'pnl-neg'}">${fmtPnl(d.total_pnl,c)}</b></div>
-    <div class="stat"><span>勝率</span><span>${d.win_rate.toFixed(1)}% (${d.wins}勝${d.losses}敗)</span></div>
-    <div class="stat"><span>期待値</span><span>${fmtPnl(d.expectancy,c)}</span></div></div>`;
-  if(d.demo_stats){
-    h+=`<div class="card"><h2>デモ成績 (${d.demo_stats.count}回)</h2>
-      <div class="stat"><span>損益</span><span class="${d.demo_stats.total_pnl>=0?'pnl-pos':'pnl-neg'}">${fmtPnl(d.demo_stats.total_pnl,c)}</span></div>
-      <div class="stat"><span>勝率</span><span>${d.demo_stats.win_rate.toFixed(1)}%</span></div></div>`;
+  if(!d.stats||!d.stats.count){
+    el.innerHTML='<div class="empty">決済済みトレードなし</div>';
+    return;
   }
-  if(d.by_ticker.length){h+='<div class="card"><h2>銘柄別</h2>';
-    d.by_ticker.forEach(t=>{h+=`<div class="stat"><span>${t.ticker}(${t.trades})</span><span class="${t.pnl>=0?'pnl-pos':'pnl-neg'}">${fmtPnl(t.pnl,c)}</span></div>`;});
-    h+='</div>';}
+  let h='';
+  if(perfMode==='compare'&&d.demo&&d.manual){
+    h+=`<div class="card"><h2>デモ vs 手動</h2><div class="compare-grid">
+      <div class="compare-col"><h3>デモ</h3>
+        <div>損益 <b class="${d.demo.total_pnl>=0?'pnl-pos':'pnl-neg'}">${fmtPnl(d.demo.total_pnl,c)}</b></div>
+        <div>勝率 ${d.demo.win_rate.toFixed(1)}%</div>
+        <div>PF ${fmtPf(d.demo.profit_factor)}</div>
+        <div>${d.demo.count}回</div></div>
+      <div class="compare-col"><h3>手動</h3>
+        <div>損益 <b class="${d.manual.total_pnl>=0?'pnl-pos':'pnl-neg'}">${fmtPnl(d.manual.total_pnl,c)}</b></div>
+        <div>勝率 ${d.manual.win_rate.toFixed(1)}%</div>
+        <div>PF ${fmtPf(d.manual.profit_factor)}</div>
+        <div>${d.manual.count}回</div></div></div></div>`;
+    h+=renderPerfStats(d.stats,c,'全体');
+    h+=renderFollow(d.signal_follow,c);
+  }else if(perfMode==='demo'){
+    h+=renderPerfStats(d.stats,c,'デモ成績');
+  }else{
+    h+=renderPerfStats(d.stats,c,'手動成績');
+    h+=renderFollow(d.signal_follow,c);
+  }
   el.innerHTML=h;
 }
 async function loadValidate(){

@@ -119,6 +119,9 @@ class AppHandler(BaseHTTPRequestHandler):
             _json_response(self, data)
         elif path == "/api/review":
             _json_response(self, tc.action_review(market, style))
+        elif path == "/api/performance":
+            mode = qs.get("mode", "all")
+            _json_response(self, tc.action_performance(market, style, mode=mode))
         elif path == "/api/validate":
             _json_response(self, tc.action_validate(market, style))
         elif path == "/api/journal":
@@ -222,13 +225,19 @@ class AppHandler(BaseHTTPRequestHandler):
 
 
 def _monitor_loop():
-    interval = tc.CONFIG["monitor_interval_sec"]
+    base = tc.CONFIG["monitor_interval_sec"]
     while not _monitor_stop.is_set():
         try:
             tc.action_monitor_all()
         except Exception:
             pass
-        _monitor_stop.wait(interval)
+        try:
+            import market_hours as mh
+            market, _ = tc._session_context()
+            wait = mh.monitor_sleep_sec(market, base)
+        except ImportError:
+            wait = base
+        _monitor_stop.wait(wait)
 
 
 def run(host: str = "0.0.0.0", port: int | None = None):
