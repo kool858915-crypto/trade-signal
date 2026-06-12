@@ -1,0 +1,26 @@
+Render 環境変数メモ (trade-signal)
+================================
+
+【Add Environment Variable で追加】
+
+Key              | Value
+-----------------|----------------------------
+WEB_PIN          | 839201  ※お好みのPINに変更可
+NTFY_TOPIC       | my-trade-alerts-x7k2
+DATA_DIR         | /tmp/data
+MONITOR_INTERVAL | 300
+
+【入れないもの】
+PORT  → Render が自動設定するので追加しない
+
+【Start Command】
+python server.py
+
+【Build Command】
+pip install -r requirements.txt
+
+【デプロイ後】
+1. 表示された URL をスマホのブラウザで開く
+2. WEB_PIN でログイン
+3. ホーム画面に追加
+4. ntfy アプリで my-trade-alerts-x7k2 を購読済みであること
