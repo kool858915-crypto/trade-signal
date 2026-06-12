@@ -214,8 +214,7 @@ def _monitor_loop():
     interval = tc.CONFIG["monitor_interval_sec"]
     while not _monitor_stop.is_set():
         try:
-            if tc.notification_enabled():
-                tc.action_monitor_all()
+            tc.action_monitor_all()
         except Exception:
             pass
         _monitor_stop.wait(interval)
@@ -223,11 +222,17 @@ def _monitor_loop():
 
 def run(host: str = "0.0.0.0", port: int | None = None):
     port = port or int(os.environ.get("PORT", "8765"))
+    ao = tc.ensure_always_on()
+    print(f"  デモ常時ON / 通知ON (market={ao['market']}, style={ao['style']})")
     try:
         import signal_lag as sl
         updated = sl.update_pending()
         if updated:
             print(f"  出遅れコスト: {updated}件の答え合わせを更新")
+    except Exception:
+        pass
+    try:
+        tc.action_scan(ao["market"], ao["style"])
     except Exception:
         pass
     monitor = threading.Thread(target=_monitor_loop, daemon=True)

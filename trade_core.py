@@ -222,7 +222,11 @@ def set_notification_enabled(enabled: bool):
 
 
 def demo_mode_enabled() -> bool:
-    return _get_setting("demo_mode", "0") == "1"
+    return _get_setting("demo_mode", "1") == "1"
+
+
+def always_on_enabled() -> bool:
+    return _get_setting("always_on", "1") == "1"
 
 
 def _session_context() -> tuple[str, str]:
@@ -316,6 +320,50 @@ def _get_params(ctx: Ctx) -> dict:
 def _active_session_id() -> int | None:
     raw = _get_setting("active_session_id")
     return int(raw) if raw else None
+
+
+def _demo_session_id() -> int:
+    """デモ常時記録用の永続セッション"""
+    raw = _get_setting("demo_session_id")
+    if raw:
+        return int(raw)
+    now = datetime.now()
+    with _db_lock:
+        conn = _conn()
+        cur = conn.execute(
+            """INSERT INTO daily_sessions
+               (market, style, session_date, started_at)
+               VALUES (?,?,?,?)""",
+            ("jp", "day", now.strftime("%Y-%m-%d"),
+             now.strftime("%Y-%m-%d %H:%M") + " [demo-always]"),
+        )
+        sid = cur.lastrowid
+        conn.commit()
+        conn.close()
+    _set_setting("demo_session_id", str(sid))
+    return sid
+
+
+def _recording_session_id() -> int | None:
+    """シグナルログ・デモ記録に使うセッションID"""
+    return _active_session_id() or _demo_session_id()
+
+
+def ensure_always_on(market: str = "jp", style: str = "day") -> dict:
+    """デモ常時ON + 本番通知ON を有効化"""
+    _set_setting("always_on", "1")
+    _set_setting("demo_mode", "1")
+    set_notification_enabled(True)
+    _set_setting("session_market", market)
+    _set_setting("session_style", style)
+    demo_sid = _demo_session_id()
+    return {
+        "demo_mode": True,
+        "notify_enabled": True,
+        "demo_session_id": demo_sid,
+        "market": market,
+        "style": style,
+    }
 
 
 def _create_session(market: str, style: str) -> int:
@@ -514,6 +562,41 @@ def _http_post(url: str, data: bytes, headers: dict) -> bool:
         return False
 
 
+def _notify_new_signals(market: str, style: str, results: list):
+    """本番向け: 新規シグナルだけntfy通知（毎回同じ銘柄は再通知しない）"""
+    if not notification_enabled():
+        return
+    key = f"scan_state_{market}_{style}"
+    try:
+        prev = json.loads(_get_setting(key, "{}") or "{}")
+    except json.JSONDecodeError:
+        prev = {}
+    new_state = dict(prev)
+    ctx = _ctx(market, style)
+
+    for item in results:
+        if item.get("error"):
+            continue
+        ticker = str(item.get("ticker", "")).upper()
+        sig = item.get("signal", "様子見")
+        new_state[ticker] = sig
+        if sig not in ("買い", "売り"):
+            continue
+        if prev.get(ticker) == sig:
+            continue
+        lines = [
+            f"銘柄: {ticker}",
+            f"シグナル: {sig}",
+            f"現値: {ctx.fmt(item.get('price', 0))}",
+        ]
+        if item.get("plan"):
+            p = item["plan"]
+            lines.append(f"損切り: {ctx.fmt(p['stop'])} / 利確: {ctx.fmt(p['target'])}")
+        send_notification(f"Signal {sig}", "\n".join(lines))
+
+    _set_setting(key, json.dumps(new_state, ensure_ascii=False))
+
+
 def send_notification(title: str, message: str, force: bool = False,
                       priority: str = "default") -> bool:
     if not force and not notification_enabled():
@@ -572,6 +655,8 @@ def action_status(market: str = "jp", style: str = "day") -> dict:
         "tuning": tuning,
         "session_active": _active_session_id() is not None,
         "demo_mode": demo_mode_enabled(),
+        "demo_always_on": always_on_enabled() and demo_mode_enabled(),
+        "always_on": always_on_enabled(),
     }
 
 
@@ -614,10 +699,11 @@ def action_scan(market: str = "jp", style: str = "day", tickers=None) -> dict:
             }
         results.append(item)
 
-        sid = _active_session_id()
+        sid = _recording_session_id()
         if sid:
             _log_signal(sid, market, style, code, r)
 
+    _notify_new_signals(market, style, results)
     demo_entries = _process_demo_entries(market, style, results)
     if market == "jp" and demo_mode_enabled():
         _record_signal_lag_on_scan(results)
@@ -674,7 +760,7 @@ def _demo_open_position(market: str, style: str, ticker: str, side: str,
     stop_val, target_val = plan.get("stop"), plan.get("target")
     conds_dict = {c["name"]: c["ok"] for c in conds} if conds else {}
     conds_json = json.dumps(conds_dict, ensure_ascii=False)
-    sid = _active_session_id()
+    sid = _demo_session_id()
 
     with _db_lock:
         conn = _conn()
@@ -819,15 +905,10 @@ def _close_all_demo_positions(market: str, style: str) -> list:
 
 def action_start(market: str = "jp", style: str = "day", demo: bool = True,
                  tickers: list | None = None) -> dict:
-    set_notification_enabled(True)
-    _set_setting("demo_mode", "1" if demo else "0")
-    _set_setting("session_market", market)
-    _set_setting("session_style", style)
+    ensure_always_on(market, style)
     _create_session(market, style)
-    label = "デモ取引" if demo else "取引"
-    message = f"{label}を開始します"
-    if demo:
-        message += "\nシグナル検出時に仮想売買を自動記録します"
+    message = "本日の記録セッションを開始しました"
+    message += "\nデモは常時稼働中。シグナルはntfy通知されます"
 
     scan_tickers = None
     if tickers:
@@ -862,39 +943,38 @@ def action_start(market: str = "jp", style: str = "day", demo: bool = True,
         except Exception:
             pass
 
-    send_notification("Trade Start", message, force=True)
-    if demo:
-        action_scan(market, style, scan_tickers)
+    send_notification("Session Start", message, force=True)
+    action_scan(market, style, scan_tickers)
     return {
         "ok": True, "message": message, "notify_enabled": True,
-        "demo_mode": demo, "recommend_summary": recommend_summary,
+        "demo_mode": True, "demo_always_on": True,
+        "recommend_summary": recommend_summary,
         "scan_tickers": scan_tickers or get_scan_tickers(market, style),
     }
 
 
 def action_end(market: str = "jp", style: str = "day") -> dict:
-    demo_closed = _close_all_demo_positions(market, style)
+    """手動記録セッションのみ締める。デモ・通知は常時ONのまま。"""
     summary = _close_session(market, style)
-    summary["demo_closed"] = len(demo_closed)
-    message = "終わります"
+    message = "本日の記録セッションを締めました"
+    message += "\nデモ取引と通知は継続中です"
     if summary["trades"]:
         ctx = _ctx(market, style)
         message += (
-            f"\n本日: {summary['trades']}回 "
+            f"\n手動記録: {summary['trades']}回 "
             f"勝{summary['wins']}敗{summary['losses']} "
             f"損益{ctx.fmt_pnl(summary['pnl'])}"
         )
     if summary.get("tuning_note"):
         message += f"\n精度調整: {summary['tuning_note']}"
-    if demo_closed:
-        demo_pnl = sum(d["pnl"] for d in demo_closed)
-        ctx = _ctx(market, style)
-        message += f"\nデモ決済: {len(demo_closed)}件 損益{ctx.fmt_pnl(demo_pnl)}"
-    send_notification("Trade End", message, force=True)
-    set_notification_enabled(False)
-    _set_setting("demo_mode", "0")
-    return {"ok": True, "message": message, "notify_enabled": False,
-            "daily_summary": summary}
+    send_notification("Session End", message, force=True)
+    return {
+        "ok": True, "message": message,
+        "notify_enabled": notification_enabled(),
+        "demo_mode": demo_mode_enabled(),
+        "demo_always_on": always_on_enabled(),
+        "daily_summary": summary,
+    }
 
 
 def action_notify_test() -> dict:
@@ -1135,36 +1215,39 @@ def action_journal(market: str = "jp", style: str = "day") -> dict:
 
 
 def action_monitor_all() -> dict:
-    """損切り監視 + デモの自動スキャン・決済"""
-    if not notification_enabled():
-        return {"ok": True, "checked": 0, "alerts": 0, "skipped": "notify_off"}
-
-    demo_closed = _demo_check_exits()
+    """損切り監視 + デモ常時スキャン・決済 + 本番通知"""
+    demo_closed = []
     demo_entries = []
     if demo_mode_enabled():
+        demo_closed = _demo_check_exits()
         market, style = _session_context()
         scan = action_scan(market, style)
         demo_entries = scan.get("demo_entries", [])
 
     with _db_lock:
         conn = _conn()
-        rows = conn.execute("SELECT * FROM positions WHERE is_demo=0 OR is_demo IS NULL").fetchall()
+        rows = conn.execute(
+            "SELECT * FROM positions WHERE is_demo=0 OR is_demo IS NULL"
+        ).fetchall()
         conn.close()
 
     alerts = 0
-    for row in rows:
-        ctx = _ctx(row["market"], row["style"])
-        before = row["stop_alerted"]
-        item = _check_position_row(row, ctx, notify=True)
-        if item.get("stop_hit") and not before and not item.get("closed"):
-            alerts += 1
+    if notification_enabled():
+        for row in rows:
+            ctx = _ctx(row["market"], row["style"])
+            before = row["stop_alerted"]
+            item = _check_position_row(row, ctx, notify=True)
+            if item.get("stop_hit") and not before and not item.get("closed"):
+                alerts += 1
 
     return {
         "ok": True, "checked": len(rows), "alerts": alerts,
         "demo_closed": len(demo_closed), "demo_entries": len(demo_entries),
-        "notify_enabled": True,
+        "notify_enabled": notification_enabled(),
+        "demo_mode": demo_mode_enabled(),
     }
 
 
-# 起動時にDB初期化
+# 起動時にDB初期化 + デモ常時ON
 init_db()
+ensure_always_on()

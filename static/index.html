@@ -90,9 +90,9 @@ nav button span{display:block;font-size:18px;margin-bottom:2px}
   <section class="panel active" id="panel-home">
     <div class="card">
       <h2>取引セッション</h2>
-      <p class="hint">開始でデモ売買を自動記録。シグナル検出→仮想エントリー→損切り/利確で自動決済。実売買不要。</p>
-      <button class="btn btn-start" onclick="startTrading()">取引を開始します（デモ）</button>
-      <button class="btn btn-end" onclick="apiPost('/api/end')">終わります</button>
+      <p class="hint">デモは常時稼働（自動記録）。シグナルはntfyで通知。開始/終了は手動記録用の日次セッションです。</p>
+      <button class="btn btn-start" onclick="startTrading()">本日の記録を開始</button>
+      <button class="btn btn-end" onclick="apiPost('/api/end')">本日の記録を締める</button>
     </div>
     <div class="card">
       <h2>今日のおすすめ銘柄</h2>
@@ -186,8 +186,11 @@ function fmtPrice(v,c){if(c==='円')return v.toLocaleString()+'円';return '$'+v
 async function refreshStatus(){
   const d=await api('/api/status');if(!d)return;
   const b=document.getElementById('status-badge');
-  b.textContent=d.notify_enabled?(d.demo_mode?'デモON':'通知ON'):'通知OFF';
-  b.className='badge '+(d.notify_enabled?'on':'off');
+  if(d.demo_always_on&&d.notify_enabled)b.textContent='デモ常時/通知ON';
+  else if(d.demo_mode&&d.notify_enabled)b.textContent='デモON/通知ON';
+  else if(d.notify_enabled)b.textContent='通知ON';
+  else b.textContent='待機中';
+  b.className='badge '+((d.notify_enabled||d.demo_always_on)?'on':'off');
   document.getElementById('watchlist').innerHTML=(d.watchlist||[]).map(t=>`<option value="${t}"></option>`).join('');
 }
 
@@ -252,7 +255,7 @@ async function startTrading(){
   const body=currentCodes.length?{codes:currentCodes}:undefined;
   const d=await apiPost('/api/start',body);
   if(d&&d.ok){
-    if(d.scan_tickers)toast('デモ開始: '+d.scan_tickers.join(', '));
+    if(d.scan_tickers)toast('記録開始・スキャン: '+d.scan_tickers.join(', '));
     else if(d.message)toast(d.message);
   }
   loadSignalLag();
@@ -272,7 +275,7 @@ async function runScan(){
     if(r.plan){h+=`<div class="cond" style="margin-top:6px">損切り ${r.plan.stop.toLocaleString()} / 利確 ${r.plan.target.toLocaleString()}</div>`;
       if(r.plan.qty>0)h+=`<div class="cond">推奨 ${r.plan.qty}</div>`;}
     if(r.signal==='買い'||r.signal==='売り'){
-      h+=`<div class="cond" style="margin-top:6px;color:#f59e0b">デモモード時は自動エントリーされます</div>`;
+      h+=`<div class="cond" style="margin-top:6px;color:#f59e0b">デモ常時稼働中は自動エントリーされます</div>`;
       const side=r.signal==='売り'?'short':'buy';
       const q=(r.plan&&r.plan.qty)?r.plan.qty:(market==='jp'?100:1);
       h+=`<button class="btn btn-secondary" style="margin-top:8px" onclick="prefill('${r.ticker}',${r.price},${q},'${side}')">手動で記録（実売買）</button>`;}
