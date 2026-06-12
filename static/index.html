@@ -131,6 +131,7 @@ nav button{font-size:9px}
       <h2>クイック</h2>
       <button class="btn btn-primary" onclick="goScan()">おすすめ銘柄をスキャン</button>
       <button class="btn btn-secondary" onclick="goPositions()">建玉を確認</button>
+      <button class="btn btn-secondary" onclick="goEntry()">手動で記録</button>
     </div>
   </section>
   <section class="panel" id="panel-scan">
@@ -139,6 +140,7 @@ nav button{font-size:9px}
     <div id="scan-results"><div class="empty">スキャンを実行してください</div></div>
   </section>
   <section class="panel" id="panel-positions">
+    <button class="btn btn-primary" onclick="goEntry()">手動で記録（実売買）</button>
     <button class="btn btn-secondary" onclick="loadPositions()">更新</button>
     <div id="positions-list"><div class="empty">建玉がありません</div></div>
   </section>
@@ -227,6 +229,7 @@ nav button{font-size:9px}
       <button class="btn btn-secondary" style="margin-top:12px" onclick="loadSettings()">再読み込み</button>
       <button class="btn btn-primary" style="margin-top:8px" onclick="testNotify('test')">通知テスト</button>
       <button class="btn btn-secondary" style="margin-top:8px" onclick="testNotify('production_signal')">本番通知テスト</button>
+      <button class="btn btn-secondary" style="margin-top:8px" onclick="testNotify('demo_entry')">デモ通知テスト</button>
     </div>
     <div class="card">
       <h2>ウォッチリスト</h2>
@@ -262,7 +265,7 @@ document.getElementById('sel-style').value=style;
 function ctxQs(){return `market=${market}&style=${style}`;}
 function toast(m){const e=document.getElementById('toast');e.textContent=m;e.classList.add('show');setTimeout(()=>e.classList.remove('show'),2500);}
 function login(){pin=document.getElementById('pin-input').value;if(!pin)return;localStorage.setItem(PIN_KEY,pin);document.getElementById('login-screen').classList.add('hidden');refreshStatus();}
-function onContextChange(){market=document.getElementById('sel-market').value;style=document.getElementById('sel-style').value;localStorage.setItem(CTX_KEY,JSON.stringify({market,style}));refreshStatus();loadRecommend();}
+async function onContextChange(){market=document.getElementById('sel-market').value;style=document.getElementById('sel-style').value;localStorage.setItem(CTX_KEY,JSON.stringify({market,style}));await apiPost('/api/settings',{market,style});refreshStatus();loadRecommend();if(document.getElementById('panel-news').classList.contains('active'))loadNews();}
 async function api(path,opts={}){const sep=path.includes('?')?'&':'?';const url=path.startsWith('/api/')?path+sep+ctxQs():path;const h={'X-Pin':pin,...opts.headers||{}};if(opts.body)h['Content-Type']='application/json';const r=await fetch(url,{...opts,headers:h});if(r.status===401){localStorage.removeItem(PIN_KEY);location.reload();return null;}return r.json();}
 async function apiPost(path,body){const d=await api(path,{method:'POST',body:body?JSON.stringify(body):undefined});if(!d)return;if(d.message)toast(d.message);if(d.error)toast(d.error);refreshStatus();return d;}
 let perfMode='compare';
@@ -270,6 +273,7 @@ function setPerfMode(m){perfMode=m;document.querySelectorAll('.mode-tabs button'
 function showPanel(n){document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));document.getElementById('panel-'+n).classList.add('active');document.querySelectorAll('nav button').forEach(b=>b.classList.toggle('active',b.dataset.panel===n));if(n==='review'){loadReview();loadJournal();loadSignalLag();loadConditionStats();}if(n==='history')loadSignalHistory();if(n==='news')loadNews();if(n==='settings'){loadSettings();loadWatchlist();}}
 function goScan(){showPanel('scan');runScan();}
 function goPositions(){showPanel('positions');loadPositions();}
+function goEntry(){document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));document.getElementById('panel-entry').classList.add('active');document.querySelectorAll('nav button').forEach(b=>b.classList.remove('active'));}
 function sigCls(s){return s==='買い'?'signal-buy':s==='売り'?'signal-sell':'signal-wait';}
 function fmtPnl(v,c){if(c==='円')return (v>=0?'+':'')+Math.round(v).toLocaleString()+'円';return (v>=0?'+':'')+v.toFixed(2)+'$';}
 function fmtPrice(v,c){if(c==='円')return v.toLocaleString()+'円';return '$'+v.toFixed(2);}
@@ -293,13 +297,20 @@ async function loadRecommend(force=false){
     const d=await api('/api/recommend');if(!d)return;
     if(!d.recommendations||!d.recommendations.length){el.innerHTML='<div class="empty">おすすめ銘柄がありません</div>';return;}
     currentCodes=d.recommendations.map(r=>r.ticker).filter(Boolean);
-    el.innerHTML=d.recommendations.map((r,i)=>{
+    let uh='';
+    if(d.news&&d.news.active_themes&&d.news.active_themes.length){
+      uh+='<div class="news-box"><div class="cond">本日のテーマ</div>';
+      d.news.active_themes.forEach(t=>{uh+=`<span class="theme-chip" style="cursor:pointer" onclick="goNewsTheme('${t}')">${t}</span>`;});
+      uh+='</div>';
+    }
+    uh+=d.recommendations.map((r,i)=>{
       let h=`<div class="card"><b>#${i+1} ${r.ticker}</b> ${r.name||''} — ${r.signal||'様子見'}`;
       if(r.avg_lag_pct!=null)h+=`<div class="cond">平均出遅れ ${r.avg_lag_pct}%</div>`;
       if(r.backtest)h+=`<div class="cond">直近1ヶ月: ${r.backtest.wins}勝${r.backtest.losses}敗</div>`;
       if(r.reasons&&r.reasons[0])h+=`<div class="reason">${r.reasons[0]}</div>`;
       return h+'</div>';
     }).join('');
+    el.innerHTML=uh;
     refreshStatus();return;
   }
   el.innerHTML='<div class="loading">チャート+ニュースを分析中...（1分ほどかかる場合があります）</div>';

@@ -51,6 +51,8 @@ def _enrich_recommendations(data: dict, market: str = "jp") -> dict:
                 r["avg_lag_pct"] = lag
                 r["lag_warning"] = lag >= 5.0
             bt = run_backtest(code, "EMA9/21", "1mo", market=market)
+            if bt.get("ok") and not bt.get("count"):
+                bt = run_backtest(code, "EMA9/21", "3mo", market=market)
             if bt.get("ok") and bt.get("count"):
                 r["backtest"] = {
                     "wins": bt["wins"], "losses": bt["losses"],
